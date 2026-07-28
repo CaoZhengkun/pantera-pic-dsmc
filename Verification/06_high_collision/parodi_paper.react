@@ -1,0 +1,10 @@
+e- + H --> e- + H
+lxcat 0.0 'electronhydrogen_elastic.lxcat'
+e- + H --> e- + H
+lxcat 10.2 'electronhydrogen_exc_2s.lxcat'
+e- + H --> e- + H
+lxcat 10.2 'electronhydrogen_exc_2p.lxcat'
+H+ + H --> H+ + H
+lxcat 0.0 'protonhydrogen_elastic.lxcat'
+H+ + H -CEX-> H + H+
+lxcat 0.0 'protonhydrogen_cex.lxcat'

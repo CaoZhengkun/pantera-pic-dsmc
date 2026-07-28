@@ -1,0 +1,176 @@
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!  Pantera input file for Parodi & Petronio (2025)                       !!!!
+!!!!  "Step-by-step verification of PIC-MCC codes"                          !!!!
+!!!!  Physics of Plasmas 32, 013902                                         !!!!
+!!!!                                                                       !!!!
+!!!!  This file implements the common settings from Table 1 of the         !!!!
+!!!!  summary document (PIC-MCC七个验证算例参数汇总.md).                   !!!!
+!!!!                                                                       !!!!
+!!!!  Default configuration: Case 2 — Electric field only                  !!!!
+!!!!    (self-consistent electrostatic field, no B field, no collisions)    !!!!
+!!!!                                                                       !!!!
+!!!!  To switch to other cases, see the comments below:                    !!!!
+!!!!    Case 1   — set PIC_type to 'none'                                   !!!!
+!!!!    Case 3a  — uncomment External_B_field with Bz = 2e-5 T             !!!!
+!!!!    Case 3b  — uncomment External_B_field with Bz = 2e-4 T             !!!!
+!!!!    Case 4a  — set Collision_type to 'MCC', add reaction files          !!!!
+!!!!    Case 4b  — same as 4a with ng = 3e20 m-3                           !!!!
+!!!!    Case 5   — same as 4b but only ionization reactions                 !!!!
+!!!!                                                                       !!!!
+!!!!  All units are SI [m, kg, s, K, V, T]                                 !!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+! ========= Computational domain and grid ===========
+
+Dimensions:
+2
+Axisymmetric:
+.FALSE.
+Domain_limits:
+0.0    0.3    0.0    0.3    -0.5    0.5   ! xmin xmax ymin ymax zmin zmax
+
+Number_of_cells:
+60     60     1
+
+
+
+Partition_style:
+stripsx
+
+! ========= Numerical parameters =====================
+
+Fnum:                
+1.25e5
+Timestep:            
+1.25e-9
+Number_of_timesteps: 
+2000
+Stats_every:         
+20
+RNG_seed:
+12345
+
+Save_initial_timestep:
+.TRUE.
+
+! ========= Physical model ===========================
+
+! --- Case 1: PIC_type = none    (no electric field, free effusion)
+! --- Case 2+: PIC_type = explicit (self-consistent electrostatic field)
+PIC_type:
+explicit
+
+
+
+! ========= Multi-species ============================
+
+Species_file:
+'parodi_paper.species'
+
+! Two mixtures: electrons and ions
+Def_mixture:
+electrons e- 1.0
+
+Def_mixture:
+ions H+ 1.0
+
+! Background neutral gas for MCC collisions
+Def_mixture:
+Neutrals H 1.0
+
+! ========= Collisions ===============================
+
+! Case 1-3:  Collision_type = NONE
+! Case 4a:   Collision_type = MCC, ng = 3e19 m^-3
+! Case 4b:   Collision_type = MCC, ng = 3e20 m^-3
+! Case 5:    Collision_type = MCC, ionization only, ng = 3e20 m^-3
+Collision_type:
+MCC
+
+! Background neutral gas: neutral hydrogen H (atomic), not H2
+MCC_background_mixture:
+Neutrals
+
+! Case 4a: ng = 3e19 m^-3; Case 4b/5: ng = 3e20 m^-3
+MCC_background_dens:
+3e19
+
+MCC_background_Ttra:
+300.
+
+MCC_null_rate:
+1e-12
+
+Reactions_file:
+'parodi_paper.react'
+
+! Remove neutral particles that might be created from background
+Remove_particles_in_mixture:
+Neutrals
+
+! VSS parameters for collision model (reference diameter, viscosity index, etc.)
+VSS_parameters_file:
+'parodi_paper.vss'
+
+
+
+! ========= Boundary conditions ======================
+
+! Potential boundary condition: all walls grounded, φ = 0 (Table 1)
+!Boundary_condition:
+!wall dirichlet 0.0
+
+!Boundary_condition:
+!wall vacuum
+
+! Volume physical group from mesh: 'plasma' (Physical Surface, tag 6)
+!Domain_type:
+!plasma fluid 1.0
+
+! Uniformly seeded particles throughout the domain (Table 1)
+! Density: n0 = 5e11 m^-3, Maxwellian velocity distribution
+!   mixture  density     vx    vy    vz    Ttrx    Ttry    Ttrz    Trot  Tvib
+Initial_particles:
+electrons  5e11  0.0  0.0  0.0  11600.  11600.  11600.  0.  0.
+
+Initial_particles:
+ions       5e11  0.0  0.0  0.0    300.    300.    300.  0.  0.
+
+! --- External magnetic field (zero for Cases 1, 2, 4, 5)
+!     Case 3a: Bz = 2e-5 T
+!     Case 3b: Bz = 2e-4 T
+External_B_field:
+0.0  0.0  0.0
+
+! ========= Output paths =============================
+
+All_output_path:
+'./dumps/'
+
+Dump_grid_start:
+0
+Dump_grid_avgevery:  
+10
+Dump_grid_numavgs:  
+10
+
+Dump_bound_start:
+100000
+Dump_bound_avgevery:
+10
+Dump_bound_numavgs:
+10
+
+Dump_part_start:    
+100000
+Dump_part_every:
+100
+
+Perform_checks:     
+.TRUE.
+Checks_every:
+20
+
+
+! ========= End of input file ========================

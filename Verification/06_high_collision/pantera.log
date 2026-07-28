@@ -1,0 +1,76 @@
+=== Pantera Simulation Log ===
+> INITIALIZING PETSc...
+> PETSc INIT DONE!
+> READING INPUT DATA...
+Velocity distribution not specified for this task! Assuming Maxwell-Boltzmann VDF...
+Velocity distribution not specified for this task! Assuming Maxwell-Boltzmann VDF...
+> SEEDING INITIAL PARTICLES IN THE DOMAIN...
+> STARTING TIME LOOP...
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+Timestep:       10 of       50 - time:      1.250E-08 [s] - CPU time:        3.9 [s] - est. time required:     0 [h]  0 [m] - number of particles:     715514 - number of collisions:     383878 - number of reactions:       5455
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+Timestep:       20 of       50 - time:      2.500E-08 [s] - CPU time:        8.1 [s] - est. time required:     0 [h]  0 [m] - number of particles:     713123 - number of collisions:     382098 - number of reactions:       5333
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+Timestep:       30 of       50 - time:      3.750E-08 [s] - CPU time:       12.2 [s] - est. time required:     0 [h]  0 [m] - number of particles:     711215 - number of collisions:     379712 - number of reactions:       5317
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+Timestep:       40 of       50 - time:      5.000E-08 [s] - CPU time:       16.4 [s] - est. time required:     0 [h]  0 [m] - number of particles:     709662 - number of collisions:     378244 - number of reactions:       5273
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+KSPConvergedReason =     2
+Timestep:       50 of       50 - time:      6.250E-08 [s] - CPU time:       20.6 [s] - est. time required:     0 [h]  0 [m] - number of particles:     708346 - number of collisions:     376986 - number of reactions:       5268
+KSPConvergedReason =     2
+===================================================================
+=======================     TIMING INFO     =======================
+===================================================================
+Section             |    MAX    |    MIN    |    AVG    |  MAX/TOT
+ Misc:                    0.00 s      0.00 s      0.00 s      0.00%.
+ Field solution:          0.20 s      0.20 s      0.20 s      1.00%.
+ Particle movement:       2.57 s      2.57 s      2.57 s     12.65%.
+ File output:            11.27 s     11.27 s     11.27 s     55.55%.
+ MPI particle comm.:      0.04 s      0.04 s      0.04 s      0.21%.
+ Collisions:              6.20 s      6.20 s      6.20 s     30.59%.
+====================================================================
+> R O A R !
