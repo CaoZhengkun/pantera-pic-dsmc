@@ -1,0 +1,17 @@
+-----
+! Electron-helium ionization cross section (threshold = 24.59 eV)
+! Energy-sharing: equal between primary and secondary electrons
+! Approximate data — REPLACE with Biagi 7.1 data from LXCat for benchmark
+ 2.459e+01   0.00e+00
+ 2.500e+01   1.00e-23
+ 3.000e+01   1.00e-22
+ 4.000e+01   3.50e-22
+ 5.000e+01   7.00e-22
+ 7.000e+01   1.35e-21
+ 1.000e+02   2.20e-21
+ 1.500e+02   2.90e-21
+ 2.000e+02   3.10e-21
+ 3.000e+02   2.80e-21
+ 5.000e+02   2.00e-21
+ 1.000e+03   1.10e-21
+-----

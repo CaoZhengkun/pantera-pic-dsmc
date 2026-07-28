@@ -1,0 +1,126 @@
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!  Pantera input file                                              !!!!!!!!
+!!!!  Case 3 — Turner et al. (2013) CCP He benchmark                   !!!!!!!!
+!!!!  Phys. Plasmas 20, 013507                                         !!!!!!!!
+!!!!                                                                   !!!!!!!!
+!!!!  Geometry:   1D Cartesian, 6.7 cm gap, 13.56 MHz RF               !!!!!!!!
+!!!!  Pressure:   n_g = 96.4e20 m^-3 (~300 Torr He at 300 K)          !!!!!!!!
+!!!!  Voltage:    V_RF = 150 V (peak), V(0) = 150 V (cos phase)        !!!!!!!!
+!!!!  Grid:       Nx = 512, ∆x = λ_D/4.03                              !!!!!!!!
+!!!!  Particles:  N_c = 128 mac/cell, Fnum = 6.85e4                   !!!!!!!!
+!!!!  Timestep:   ∆t = 1/(1600f) = 4.609e-11 s, N_steps = 8,192,000   !!!!!!!!
+!!!!                                                                   !!!!!!!!
+!!!!  All units are SI [m, kg, s, K, V]                                !!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+! ========= Computational domain and grid ===========
+
+Dimensions:
+2
+Axisymmetric:
+.FALSE.
+
+! 1D in x with 1 cell in y — parallel plates at x = 0 and x = 0.067 m
+Domain_limits:
+0.0  0.067  0.0  1.3086e-4  -0.5  0.5   ! xmin xmax ymin ymax zmin zmax
+
+Number_of_cells:
+512  1  1
+
+
+! ========= Numerical parameters =====================
+
+Fnum:
+6.85e4
+Timestep:
+4.6091e-11
+Number_of_timesteps:
+8192000
+Stats_every:
+10000
+
+! === Collisions — MCC with He background ===========
+
+Collision_type:
+MCC
+
+MCC_background_dens:
+96.4e20
+MCC_background_Ttra:
+300.0
+MCC_background_mixture:
+He 1.0
+
+Reactions_file:
+'../helium.react'
+
+
+! ========= Multi-species ============================
+
+Species_file:
+'../helium.species'
+
+Def_mixture:
+electrons e- 1.0
+
+Def_mixture:
+ions He+ 1.0
+
+
+! ========= Boundary conditions ======================
+
+! Left electrode (x = 0):   grounded, φ = 0
+! Right electrode (x = L):  RF driven, φ = 150·cos(2π·13.56e6·t)
+
+Domain_specular:
+.FALSE.  .FALSE.  .FALSE.  .FALSE.
+
+Domain_potential:
+0.0  0.0  0.0  0.0
+Domain_rf_amplitude:
+0.0  300.0  0.0  0.0
+Domain_rf_frequency:
+13.56e6
+
+
+! ========= Initial conditions =======================
+
+! Initial uniform plasma: n0 = 5.12e14 m^-3
+! Electron temperature: T_e = 30000 K (~2.585 eV)
+! Ion temperature:      T_i = 300 K
+
+Initial_particles:
+electrons  5.12e14  0.0  0.0  0.0  30000.  30000.  30000.  0.  0.
+
+Initial_particles:
+ions       5.12e14  0.0  0.0  0.0    300.    300.    300.  0.  0.
+
+
+! ========= Output paths =============================
+
+All_output_path:
+'./dumps/'
+
+! Grid output averaged over last 32 RF cycles (= 51200 steps)
+Dump_grid_start:
+8140800
+Dump_grid_avgevery:
+1
+Dump_grid_numavgs:
+51200
+
+Dump_bound_start:
+8140800
+Dump_bound_avgevery:
+1
+Dump_bound_numavgs:
+51200
+
+Dump_part_start:
+1000000
+
+Perform_checks:
+.FALSE.
+
+! ========= End of input file ========================

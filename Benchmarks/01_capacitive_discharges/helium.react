@@ -1,0 +1,29 @@
+!===============================================================================
+!  Reaction definitions for He CCP benchmark (Turner et al., 2013)
+!  Reference: M. M. Turner et al., Phys. Plasmas 20, 013507 (2013)
+!
+!  Cross-section data must be obtained from the paper's supplementary
+!  material or from LXCat (www.lxcat.net) — Biagi database.
+!
+!  Reaction list:
+!    1) e + He  -> e + He         (elastic momentum-transfer)
+!    2) e + He  -> e + He         (excitation, lumped 2^3S + 2^1S)
+!    3) e + He  -> e + e + He+    (ionization, equal energy sharing)
+!    4) He+ + He -> He+ + He      (ion elastic / isotropic)
+!    5) He+ + He -> He + He+      (charge exchange / backward scatter)
+!===============================================================================
+
+e- + He --> e- + He
+lxcat 0.0 'reactions/electronhelium_elastic.lxcat'
+
+e- + He --> e- + He
+lxcat 19.8 'reactions/electronhelium_excitation.lxcat'
+
+e- + He --> e- + e- + He+
+lxcat 24.59 'reactions/electronhelium_ionization.lxcat'
+
+He+ + He --> He+ + He
+lxcat 0.0 'reactions/ionhelium_elastic.lxcat'
+
+He+ + He --> He + He+
+lxcat 0.0 'reactions/ionhelium_cex.lxcat'

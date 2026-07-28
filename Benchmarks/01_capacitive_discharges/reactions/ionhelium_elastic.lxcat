@@ -1,0 +1,17 @@
+-----
+! He+ + He elastic (polarization scattering) cross section
+! Approximate data — REPLACE with Phelps-style data for benchmark
+ 1.000e-02   5.00e-18
+ 2.000e-02   4.50e-18
+ 5.000e-02   3.80e-18
+ 1.000e-01   3.20e-18
+ 2.000e-01   2.70e-18
+ 5.000e-01   2.10e-18
+ 1.000e+00   1.60e-18
+ 2.000e+00   1.10e-18
+ 5.000e+00   5.00e-19
+ 1.000e+01   2.50e-19
+ 2.000e+01   1.20e-19
+ 5.000e+01   4.00e-20
+ 1.000e+02   1.50e-20
+-----
