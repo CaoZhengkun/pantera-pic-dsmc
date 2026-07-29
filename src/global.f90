@@ -412,6 +412,7 @@ MODULE global
    INTEGER           :: MCC_BG_MIX
    LOGICAL           :: MCC_CREATE_PARTICLES_FROM_BG = .FALSE.
    REAL(KIND=8)      :: MCC_NULL_RATE = 1e-12
+   INTEGER           :: CS_OOB_MODE = 0 ! 0=zero (default), 1=clamp
    REAL(KIND=8), DIMENSION(:,:), ALLOCATABLE :: MCC_BG_CELL_NRHO
    LOGICAL           :: BOOL_BG_DENSITY_FILE = .FALSE.
    INTEGER           :: DSMC_COLL_MIX

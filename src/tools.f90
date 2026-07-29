@@ -1492,7 +1492,9 @@ CONTAINS
    ! SUBROUTINE INTERP_CS -> Interpolates a tabulated cross-section given an energy  !
    ! There are a few variations. Here:                                               !
    ! * We interpolate linearly                                                       !
-   ! * For energy values out of the table we set the cross section to zero           !
+   ! * For energy values out of the table, behavior is controlled by CS_OOB_MODE:    !
+   !   - 0: set cross-section to zero (default)                                      !
+   !   - 1: clamp to the nearest table value (last/first entry)                      !
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
    FUNCTION INTERP_CS(VALUE_EN, TABLE_EN, TABLE_CS) RESULT(VALUE_CS)
@@ -1511,13 +1513,19 @@ CONTAINS
       INDEX = -1
       IF (VALUE_EN .LT. TABLE_EN(L)) THEN
          ! Lower than lower energy value
-         !VALUE_CS = TABLE_CS(L)
-         VALUE_CS = 0
+         IF (CS_OOB_MODE == 0) THEN
+            VALUE_CS = 0
+         ELSE
+            VALUE_CS = TABLE_CS(L)
+         END IF
          RETURN
       ELSE IF (VALUE_EN .GT. TABLE_EN(R)) THEN
          ! Higher than highest energy value
-         !VALUE_CS = TABLE_CS(R)
-         VALUE_CS = 0
+         IF (CS_OOB_MODE == 0) THEN
+            VALUE_CS = 0
+         ELSE
+            VALUE_CS = TABLE_CS(R)
+         END IF
          RETURN
       ELSE IF (R == L+1) THEN
          ! Only two values in the table

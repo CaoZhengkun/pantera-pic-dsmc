@@ -48,7 +48,7 @@ MODULE initialization
       CHARACTER*512      :: MIXTURE_DEFINITION, VSS_PARAMS_FILENAME, LINESOURCE_DEFINITION, WALL_DEFINITION, MCC_BG_FILENAME
       CHARACTER*512      :: BC_DEFINITION, SOLENOID_DEFINITION, MAGNET_DEFINITION, FLUID_DEFINITION
       CHARACTER*64       :: MIX_BOUNDINJECT_NAME, DSMC_COLL_MIX_NAME, MCC_BG_MIX_NAME, PIC_TYPE_STRING, PARTITION_STYLE_STRING, &
-      COLLISION_TYPE_STRING, REMOVE_MIX_NAME, MIX_BOUNDINJECT_VDF_NAME
+      COLLISION_TYPE_STRING, REMOVE_MIX_NAME, MIX_BOUNDINJECT_VDF_NAME, CS_OOB_STR
       CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE :: TEMP_VDF_BOUND
 
       ! Open input file for reading
@@ -320,6 +320,16 @@ MODULE initialization
          IF (line=='MCC_background_file:') THEN
             READ(in1,*) MCC_BG_FILENAME
             CALL READ_MCC_BACKGROUND_FILE(MCC_BG_FILENAME)
+         END IF
+         IF (line=='CS_table_oob:') THEN
+            READ(in1,*) CS_OOB_STR
+            IF (CS_OOB_STR == "zero") THEN
+               CS_OOB_MODE = 0
+            ELSE IF (CS_OOB_STR == "clamp") THEN
+               CS_OOB_MODE = 1
+            ELSE
+               CALL ERROR_ABORT('CS_table_oob: mode must be "zero" or "clamp"')
+            END IF
          END IF
          IF (line=='VSS_parameters_file:')     THEN
             READ(in1,*) VSS_PARAMS_FILENAME
