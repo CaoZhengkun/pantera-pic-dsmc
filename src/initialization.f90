@@ -88,6 +88,9 @@ MODULE initialization
          IF (line=='Domain_diffuse:')          READ(in1,*) BOOL_DIFFUSE
          IF (line=='Boundary_temperature:')    READ(in1,*) BOUNDTEMP
          IF (line=='Domain_react:')            READ(in1,*) BOOL_REACT
+         IF (line=='Domain_potential:')      READ(in1,*) DOMAIN_POTENTIAL
+         IF (line=='Domain_rf_amplitude:')   READ(in1,*) DOMAIN_RF_AMPLITUDE
+         IF (line=='Domain_rf_frequency:')   READ(in1,*) DOMAIN_RF_FREQUENCY
          IF (line=='Wall_reactions_file:') THEN
             READ(in1,*) WALL_REACTIONS_FILENAME
             CALL READ_WALL_REACTIONS(WALL_REACTIONS_FILENAME)

@@ -822,9 +822,13 @@ MODULE fields
                IEAST = I+1
                IWEST = I-1
 
-               IF ((I == 0) .OR. (I == NPX-1)) THEN
-                  ! Boundary point
-                  DIRICHLET(ICENTER) = 0.d0
+               IF (I == 0) THEN
+                  ! xmin boundary
+                  DIRICHLET(ICENTER) = DOMAIN_POTENTIAL(1)
+                  IS_DIRICHLET(ICENTER) = .TRUE.
+               ELSE IF (I == NPX-1) THEN
+                  ! xmax boundary
+                  DIRICHLET(ICENTER) = DOMAIN_POTENTIAL(2)
                   IS_DIRICHLET(ICENTER) = .TRUE.
 
                ELSE
@@ -869,13 +873,22 @@ MODULE fields
                   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                   ! Plume 2d cartesian, full domain !
                   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                  IF ((I == 0) .OR. (I == NPX-1) .OR. (J == 0) .OR. (J == NPY-1)) THEN
-                     ! Boundary point
-                     ! CALL MatSetValue(Amat,ICENTER,ICENTER,1.d0,INSERT_VALUES,ierr)
-                     ! On the boundary or on the rest of the PFG.
-                     DIRICHLET(ICENTER) = 0.d0
+                  IF (I == 0) THEN
+                     ! xmin boundary
+                     DIRICHLET(ICENTER) = DOMAIN_POTENTIAL(1)
                      IS_DIRICHLET(ICENTER) = .TRUE.
-
+                  ELSE IF (I == NPX-1) THEN
+                     ! xmax boundary
+                     DIRICHLET(ICENTER) = DOMAIN_POTENTIAL(2)
+                     IS_DIRICHLET(ICENTER) = .TRUE.
+                  ELSE IF (J == 0) THEN
+                     ! ymin boundary
+                     DIRICHLET(ICENTER) = DOMAIN_POTENTIAL(3)
+                     IS_DIRICHLET(ICENTER) = .TRUE.
+                  ELSE IF (J == NPY-1) THEN
+                     ! ymax boundary
+                     DIRICHLET(ICENTER) = DOMAIN_POTENTIAL(4)
+                     IS_DIRICHLET(ICENTER) = .TRUE.
 
                   ELSE
                      ! Interior point.
@@ -6200,6 +6213,32 @@ MODULE fields
 
       END IF
 
+      IF (GRID_TYPE == RECTILINEAR_UNIFORM .OR. GRID_TYPE == RECTILINEAR_NONUNIFORM) THEN
+         IF (DIMS == 1) THEN
+            DIRICHLET(0) = DOMAIN_POTENTIAL(1) &
+                         + 0.5*DOMAIN_RF_AMPLITUDE(1)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+            DIRICHLET(NPX-1) = DOMAIN_POTENTIAL(2) &
+                             + 0.5*DOMAIN_RF_AMPLITUDE(2)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+         ELSE IF (DIMS == 2) THEN
+            DO I = 0, NPX-1
+               DO J = 0, NPY-1
+                  IF (I == 0) THEN
+                     DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(1) &
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(1)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                  ELSE IF (I == NPX-1) THEN
+                     DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(2) &
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(2)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                  ELSE IF (J == 0) THEN
+                     DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(3) &
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(3)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                  ELSE IF (J == NPY-1) THEN
+                     DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(4) &
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(4)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                  END IF
+               END DO
+            END DO
+         END IF
+      END IF
 
 
 
