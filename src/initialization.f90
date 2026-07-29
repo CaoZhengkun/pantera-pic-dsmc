@@ -244,6 +244,7 @@ MODULE initialization
          IF (line=='Checks_output:')           READ(in1,*) CHECKS_SAVE_PATH
          IF (line=='All_output_path:') THEN
             READ(in1,*) FLOWFIELD_SAVE_PATH
+            CALL MAKE_TIMESTAMPED_DIR(FLOWFIELD_SAVE_PATH)
             CHECKS_SAVE_PATH = FLOWFIELD_SAVE_PATH
             FLUXDUMP_SAVE_PATH = FLOWFIELD_SAVE_PATH
             TRAJDUMP_SAVE_PATH = FLOWFIELD_SAVE_PATH

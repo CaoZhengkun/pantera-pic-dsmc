@@ -1679,4 +1679,69 @@ CONTAINS
    END FUNCTION DQDCRT
 
 
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! SUBROUTINE MAKE_TIMESTAMPED_DIR -> Create timestamped output dir !!
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! Takes a base path (e.g. './dumps'), creates a timestamped
+   ! subdirectory (e.g. './dumps/run_20250729_120000/'),
+   ! and updates base_path to point there.
+   ! All output goes into the new subdirectory — no STATUS='NEW' clashes.
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   SUBROUTINE MAKE_TIMESTAMPED_DIR(base_path)
+      IMPLICIT NONE
+      CHARACTER(LEN=*), INTENT(INOUT) :: base_path
+      CHARACTER(LEN=256) :: stamp_path, cmd
+      CHARACTER(LEN=8) :: dat
+      CHARACTER(LEN=10) :: tim
+      INTEGER :: dt(8), st
+
+      ! Get current date and time
+      CALL DATE_AND_TIME(VALUES=dt)
+
+      ! Format as run_YYYYMMDD_HHMMSS
+      WRITE(dat, '(I4.4,I2.2,I2.2)') dt(1), dt(2), dt(3)
+      WRITE(tim, '(I2.2,I2.2,I2.2)') dt(5), dt(6), dt(7)
+
+      ! Strip trailing slash/backslash from base_path
+      base_path = TRIM(ADJUSTL(base_path))
+      IF (base_path(LEN_TRIM(base_path):LEN_TRIM(base_path)) == '/' .OR. &
+          base_path(LEN_TRIM(base_path):LEN_TRIM(base_path)) == '\') THEN
+         base_path = base_path(1:LEN_TRIM(base_path)-1)
+      END IF
+
+      ! Ensure base directory exists before creating timestamp subdirectory
+      cmd = 'mkdir "' // TRIM(base_path) // '"'
+      CALL EXECUTE_COMMAND_LINE(TRIM(cmd), CMDSTAT=st)
+      IF (st /= 0) THEN
+         ! Fallback: Unix-style mkdir -p
+         cmd = 'mkdir -p "' // TRIM(base_path) // '"'
+         CALL EXECUTE_COMMAND_LINE(TRIM(cmd), CMDSTAT=st)
+      END IF
+      IF (st /= 0) THEN
+         WRITE(*,'(A)') '  [ERROR] Cannot create output base directory: ' // TRIM(base_path)
+         STOP
+      END IF
+
+      ! Compose timestamped subdirectory path
+      stamp_path = TRIM(base_path) // '/run_' // TRIM(dat) // '_' // TRIM(tim)
+
+      ! Create timestamped subdirectory
+      cmd = 'mkdir "' // TRIM(stamp_path) // '"'
+      CALL EXECUTE_COMMAND_LINE(TRIM(cmd), CMDSTAT=st)
+      IF (st /= 0) THEN
+         cmd = 'mkdir -p "' // TRIM(stamp_path) // '"'
+         CALL EXECUTE_COMMAND_LINE(TRIM(cmd), CMDSTAT=st)
+      END IF
+      IF (st /= 0) THEN
+         WRITE(*,'(A)') '  [ERROR] Cannot create timestamp output directory: ' // TRIM(stamp_path)
+         STOP
+      END IF
+
+      ! Show the user where output is going
+      WRITE(*,'(A)') '  [INFO] Output directory: ' // TRIM(stamp_path) // '/'
+
+      ! Update base_path with trailing slash for use as save path
+      base_path = TRIM(stamp_path) // '/'
+   END SUBROUTINE MAKE_TIMESTAMPED_DIR
+
 END MODULE tools
