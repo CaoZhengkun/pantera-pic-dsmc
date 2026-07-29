@@ -297,8 +297,9 @@ MODULE timecycle
 
          IF (BOOL_THERMAL_BATH) CALL THERMAL_BATH
 
-
-
+         ! Remove background particles created by MCC immediately,
+         ! before they pollute grid averaging and conservation checks.
+         IF (REMOVE_MIX .NE. -1) CALL REMOVE_PARTICLES_IN_MIXTURE(REMOVE_MIX)
 
          CALL TIMER_START(4)
          ! ########### Dump particles ##############################################
@@ -342,8 +343,6 @@ MODULE timecycle
 
          ! ########### Perform the conservation checks ###################################
          IF (PERFORM_CHECKS .AND. MOD(tID, CHECKS_EVERY) .EQ. 0) CALL CHECKS
-
-         IF (REMOVE_MIX .NE. -1) CALL REMOVE_PARTICLES_IN_MIXTURE(REMOVE_MIX)
 
 
 
