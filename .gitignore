@@ -1,0 +1,33 @@
+# 编译产物
+pantera.exe
+pantera.o
+*.o
+*.mod
+*.obj
+*.exe
+*.out
+
+# 可视化输出
+*.vtk
+*.log
+output.log
+fort.*
+
+# IDE 配置
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 数据输出
+out/
+data/
+
+# 临时文件
+*~
+*.bak
+
+Pantera data form paper/
+doc/
+dsmc/
