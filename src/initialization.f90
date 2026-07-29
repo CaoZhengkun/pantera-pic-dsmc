@@ -3002,6 +3002,8 @@ MODULE initialization
          END IF
          ALLOCATE(E_FIELD(3, 0:NPY-1, 0:NPX-1))
          E_FIELD = 0.d0
+         ALLOCATE(SURFACE_CHARGE(NNODES))
+         SURFACE_CHARGE = 0.d0
       END IF
 
    END SUBROUTINE INITFIELDS
