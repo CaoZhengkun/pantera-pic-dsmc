@@ -17,7 +17,7 @@
 ! ========= Computational domain and grid ===========
 
 Dimensions:
-2
+1
 Axisymmetric:
 .FALSE.
 
@@ -37,24 +37,29 @@ Timestep:
 2.3045e-11
 Number_of_timesteps:
 49152000
+PIC_type:
+explicit
+
 Stats_every:
 50000
 
 ! === Collisions — MCC with He background ===========
 
 Collision_type:
-MCC
+MCC_VAHEDI
 
 MCC_background_dens:
 321e20
 MCC_background_Ttra:
 300.0
 MCC_background_mixture:
-He 1.0
+background
 
 Reactions_file:
 '../helium.react'
 
+CS_table_oob:
+clamp
 
 ! ========= Multi-species ============================
 
@@ -66,12 +71,17 @@ electrons e- 1.0
 
 Def_mixture:
 ions He+ 1.0
+Def_mixture:
+background He 1.0
+
+Remove_mixture:
+background
 
 
 ! ========= Boundary conditions ======================
 
 ! Left electrode (x = 0):   grounded, φ = 0
-! Right electrode (x = L):  RF driven, φ = 120·cos(2π·13.56e6·t)
+! Right electrode (x = L):  RF driven, φ = 120·sin(2π·13.56e6·t)
 
 Domain_specular:
 .FALSE.  .FALSE.  .FALSE.  .FALSE.

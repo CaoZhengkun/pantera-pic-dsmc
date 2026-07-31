@@ -7,17 +7,21 @@
 !
 !  Reaction list:
 !    1) e + He  -> e + He         (elastic momentum-transfer)
-!    2) e + He  -> e + He         (excitation, lumped 2^3S + 2^1S)
-!    3) e + He  -> e + e + He+    (ionization, equal energy sharing)
-!    4) He+ + He -> He+ + He      (ion elastic / isotropic)
-!    5) He+ + He -> He + He+      (charge exchange / backward scatter)
+!    2) e + He  -> e + He         (excitation, 2^3S triplet, 19.82 eV)
+!    3) e + He  -> e + He         (excitation, 2^1S singlet, 20.61 eV)
+!    4) e + He  -> e + e + He+    (ionization, 24.59 eV, equal energy sharing)
+!    5) He+ + He -> He+ + He      (ion elastic / isotropic)
+!    6) He+ + He -> He + He+      (charge exchange / backward scatter)
 !===============================================================================
 
 e- + He --> e- + He
 lxcat 0.0 'reactions/electronhelium_elastic.lxcat'
 
 e- + He --> e- + He
-lxcat 19.8 'reactions/electronhelium_excitation.lxcat'
+lxcat 19.82 'reactions/electronhelium_excitation.lxcat'
+
+e- + He --> e- + He
+lxcat 20.61 'reactions/electronhelium_singlet.lxcat'
 
 e- + He --> e- + e- + He+
 lxcat 24.59 'reactions/electronhelium_ionization.lxcat'
