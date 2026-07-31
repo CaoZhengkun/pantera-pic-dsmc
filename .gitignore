@@ -6,6 +6,8 @@ pantera.o
 *.obj
 *.exe
 *.out
+*.md
+*.xlsx
 
 # 可视化输出
 *.vtk
@@ -32,3 +34,4 @@ Pantera data form paper/
 doc/
 dsmc/
 **/dumps/
+**/supplements/
