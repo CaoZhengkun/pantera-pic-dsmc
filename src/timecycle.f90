@@ -1262,11 +1262,10 @@ MODULE timecycle
 
             DTCOLL = particles(IP)%DTRIM ! Looking for collisions within the remaining time
             ! ______ ADVECTION ______
+            BOUNDCOLL = -1
+            WALLCOLL = -1
+
             IF (GRID_TYPE == UNSTRUCTURED) THEN
-               !WRITE(*,*) 'Moving particle ', IP, ' for ', DTCOLL, ' s. Position: ', particles(IP)%X, particles(IP)%Y,&
-               !' velocity: ', particles(IP)%VX, particles(IP)%VY
-               ! For unstructured, we only need to check the boundaries of the cell.
-               BOUNDCOLL = -1
                
                   
                IF (AXI) THEN

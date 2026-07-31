@@ -2291,7 +2291,17 @@ MODULE initialization
       INTEGER :: I, NROWS
       CHARACTER*512      :: LINECS
       CHARACTER*256      :: REACTION_FILENAME
-      
+      CHARACTER*256      :: REACTIONS_DIR
+      INTEGER            :: SLASH_POS
+
+      ! ---- Extract directory path from FILENAME ----
+      REACTIONS_DIR = ''
+      SLASH_POS = INDEX(FILENAME, '/', BACK=.TRUE.)
+      IF (SLASH_POS == 0) SLASH_POS = INDEX(FILENAME, '\', BACK=.TRUE.)
+      IF (SLASH_POS > 0) THEN
+         REACTIONS_DIR = FILENAME(1:SLASH_POS)
+      END IF
+
       !CHARACTER*64 :: SP_NAME
       !INTEGER      :: SP_ID
       !REAL(KIND=8) :: DIAM
@@ -2387,7 +2397,7 @@ MODULE initialization
             READ(STRARRAY(3), *) REACTION_FILENAME
 
 
-            OPEN(UNIT=in4,FILE=REACTION_FILENAME, STATUS='old',IOSTAT=ios)
+            OPEN(UNIT=in4,FILE=TRIM(REACTIONS_DIR)//TRIM(REACTION_FILENAME), STATUS='old',IOSTAT=ios)
 
             IF (ios .NE. 0) THEN
                CALL ERROR_ABORT('Attention, reactions cross section file not found! ABORTING.')
@@ -2403,10 +2413,11 @@ MODULE initialization
             END DO
             NROWS = 0
             DO
-               READ(in4,'(A)', IOSTAT=ReasonEOFCS) LINECS  
+               READ(in4,'(A)', IOSTAT=ReasonEOFCS) LINECS
                IF (ReasonEOFCS < 0) CALL ERROR_ABORT('Attention, reactions cross section file format error! ABORTING.')
-                  
+
                IF (LINECS(1:5) == '-----') EXIT
+               IF (TRIM(LINECS) == '') CYCLE  ! Skip blank lines
                NROWS = NROWS + 1
             END DO
             REWIND(in4)

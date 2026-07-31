@@ -5888,8 +5888,10 @@ MODULE fields
             CALL COMPUTE_WEIGHTS(JP, WEIGHTS, INDICES, INDI, INDJ)
 
    
-            IF (GRID_TYPE == RECTILINEAR_UNIFORM .AND. DIMS == 2) THEN
+            IF (GRID_TYPE == RECTILINEAR_UNIFORM) THEN
                VOL = CELL_VOL
+            ELSE IF (GRID_TYPE == RECTILINEAR_NONUNIFORM) THEN
+               VOL = CELL_VOLUMES(part_adv(JP)%IC)
             ELSE IF (GRID_TYPE == UNSTRUCTURED .AND. DIMS == 1) THEN
                VOL = U1D_GRID%CELL_VOLUMES(part_adv(JP)%IC)
             ELSE IF (GRID_TYPE == UNSTRUCTURED .AND. DIMS == 2) THEN
@@ -6216,24 +6218,24 @@ MODULE fields
       IF (GRID_TYPE == RECTILINEAR_UNIFORM .OR. GRID_TYPE == RECTILINEAR_NONUNIFORM) THEN
          IF (DIMS == 1) THEN
             DIRICHLET(0) = DOMAIN_POTENTIAL(1) &
-                         + 0.5*DOMAIN_RF_AMPLITUDE(1)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                         + 0.5*DOMAIN_RF_AMPLITUDE(1)*SIN(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
             DIRICHLET(NPX-1) = DOMAIN_POTENTIAL(2) &
-                             + 0.5*DOMAIN_RF_AMPLITUDE(2)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                             + 0.5*DOMAIN_RF_AMPLITUDE(2)*SIN(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
          ELSE IF (DIMS == 2) THEN
             DO I = 0, NPX-1
                DO J = 0, NPY-1
                   IF (I == 0) THEN
                      DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(1) &
-                                        + 0.5*DOMAIN_RF_AMPLITUDE(1)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(1)*SIN(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
                   ELSE IF (I == NPX-1) THEN
                      DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(2) &
-                                        + 0.5*DOMAIN_RF_AMPLITUDE(2)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(2)*SIN(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
                   ELSE IF (J == 0) THEN
                      DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(3) &
-                                        + 0.5*DOMAIN_RF_AMPLITUDE(3)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(3)*SIN(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
                   ELSE IF (J == NPY-1) THEN
                      DIRICHLET(I+NPX*J) = DOMAIN_POTENTIAL(4) &
-                                        + 0.5*DOMAIN_RF_AMPLITUDE(4)*COS(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
+                                        + 0.5*DOMAIN_RF_AMPLITUDE(4)*SIN(2*PI*DOMAIN_RF_FREQUENCY*tID*DT)
                   END IF
                END DO
             END DO

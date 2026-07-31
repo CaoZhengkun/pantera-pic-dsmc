@@ -53,42 +53,34 @@ MODULE grid_and_partition
          XCELL = INT((XP-XMIN)/DX)
          YCELL = INT((YP-YMIN)/DY)
 
-         ! IF (XCELL .GT. (NX-1)) THEN 
-         !    XCELL = NX-1
-         !    WRITE(*,*) 'Particle out of bound xhi!'
-         ! ELSE IF (XCELL .LT. 0) THEN
-         !    XCELL = 0
-         !    WRITE(*,*) 'Particle out of bound xlo!'
-         ! END IF
+         IF (XCELL .GT. (NX-1)) THEN
+            XCELL = NX-1
+         ELSE IF (XCELL .LT. 0) THEN
+            XCELL = 0
+         END IF
 
-         ! IF (YCELL .GT. (NY-1)) THEN 
-         !    YCELL = NY-1
-         !    WRITE(*,*) 'Particle out of bound yhi!'
-         ! ELSE IF (YCELL .LT. 0) THEN
-         !    YCELL = 0
-         !    WRITE(*,*) 'Particle out of bound ylo!'
-         ! END IF
+         IF (YCELL .GT. (NY-1)) THEN
+            YCELL = NY-1
+         ELSE IF (YCELL .LT. 0) THEN
+            YCELL = 0
+         END IF
 
          IDCELL = XCELL + NX*YCELL + 1
       ELSE IF (GRID_TYPE == RECTILINEAR_NONUNIFORM) THEN
          XCELL = BINARY_SEARCH(XP, XCOORD)
          YCELL = BINARY_SEARCH(YP, YCOORD)
 
-         ! IF (XCELL .GT. (NX)) THEN 
-         !    XCELL = NX
-         !    WRITE(*,*) 'Particle out of bound xhi!', XCELL, NX
-         ! ELSE IF (XCELL .LT. 1) THEN
-         !    XCELL = 1
-         !    WRITE(*,*) 'Particle out of bound xlo!'
-         ! END IF
+         IF (XCELL .GT. NX) THEN
+            XCELL = NX
+         ELSE IF (XCELL .LT. 1) THEN
+            XCELL = 1
+         END IF
 
-         ! IF (YCELL .GT. (NY)) THEN 
-         !    YCELL = NY
-         !    WRITE(*,*) 'Particle out of bound yhi!'
-         ! ELSE IF (YCELL .LT. 1) THEN
-         !    YCELL = 1
-         !    WRITE(*,*) 'Particle out of bound ylo!'
-         ! END IF
+         IF (YCELL .GT. NY) THEN
+            YCELL = NY
+         ELSE IF (YCELL .LT. 1) THEN
+            YCELL = 1
+         END IF
 
          IDCELL = XCELL + NX*(YCELL-1)
       END IF
@@ -2339,7 +2331,7 @@ MODULE grid_and_partition
                         FOUND = 0
                         DO V1 = 1, 2
                            IF (U1D_GRID%CELL_NODES(V1,JC1) == JN) THEN
-                              U1D_GRID%CELL_EDGES_PG(V1, JC1) = I
+                              U1D_GRID%CELL_EDGES_PG(V1, JC1) = PG_MAP(IPG)
                            END IF
                         END DO
                      END DO
