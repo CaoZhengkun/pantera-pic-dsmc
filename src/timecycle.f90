@@ -41,8 +41,10 @@ MODULE timecycle
       REAL(KIND=8) :: FIELD_POWER_TOT
       REAL(KIND=8) :: CURRENT_TIME, CURRENT_CPU_TIME, EST_TIME
       INTEGER :: EST_TIME_H, EST_TIME_M
+      INTEGER :: IOS_LOG
 
       CHARACTER(len=512) :: stringTMP
+      CHARACTER(LEN=512) :: STATS_LOG_FILENAME
 
       ! Init variables
       NP_TOT = 0
@@ -106,6 +108,57 @@ MODULE timecycle
       ! ########### Perform the conservation checks ###################################
       IF (PERFORM_CHECKS .AND. MOD(tID, CHECKS_EVERY) .EQ. 0) CALL CHECKS
 
+      ! ########### Open the stats log file (master only) #################################
+      ! Echo the Stats_every / Timing_stats_every console output into a text file. Only
+      ! the master process opens/writes it; other procs keep STATS_LOG_UNIT = 0 and every
+      ! WRITE below is guarded by "STATS_LOG_UNIT /= 0".
+      IF (PROC_ID == 0) THEN
+         IF (LEN_TRIM(FLOWFIELD_SAVE_PATH) > 0) THEN
+            STATS_LOG_FILENAME = TRIM(FLOWFIELD_SAVE_PATH) // 'stats.log'
+         ELSE
+            STATS_LOG_FILENAME = './stats.log'
+         END IF
+         OPEN(NEWUNIT=STATS_LOG_UNIT, FILE=TRIM(STATS_LOG_FILENAME), STATUS='REPLACE', &
+              ACTION='WRITE', IOSTAT=IOS_LOG)
+         IF (IOS_LOG /= 0) THEN
+            STATS_LOG_UNIT = 0
+            WRITE(*,*) '  [WARNING] Cannot open stats log file: ' // TRIM(STATS_LOG_FILENAME)
+         ELSE
+            WRITE(*,*) '  [INFO] Stats log: ' // TRIM(STATS_LOG_FILENAME)
+         END IF
+      END IF
+
+      ! ########### Print simulation info at the initial state (t=0) ###########
+      ! The stats print inside the time loop (MOD(tID, STATS_EVERY) == 0) only runs for
+      ! tID >= 1 (the loop body starts after tID = tID + 1), so the state right after the
+      ! initial seeding is never reported. Print it here once, before entering the loop.
+      CURRENT_TIME = 0.d0
+      CURRENT_CPU_TIME = 0.d0
+      EST_TIME_H = 0
+      EST_TIME_M = 0
+      TIMESTEP_COLL = 0
+      TIMESTEP_REAC = 0
+      FIELD_POWER = 0
+
+      CALL MPI_REDUCE(NP_PROC, NP_TOT, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+      CALL MPI_REDUCE(TIMESTEP_COLL, NCOLL_TOT, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+      CALL MPI_REDUCE(TIMESTEP_REAC, NREAC_TOT, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+      CALL MPI_REDUCE(FIELD_POWER, FIELD_POWER_TOT, 1, MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+
+      WRITE(stringTMP, '(A13,I8,A4,I8,A9,ES14.3,A17,F10.1,A27,I5,A5,I2,A4,A24,I10,A25,I10,A24,I10)') &
+                     '   Timestep: ', tID, ' of ', NT, &
+                     ' - time: ', CURRENT_TIME, ' [s] - CPU time: ', CURRENT_CPU_TIME, &
+                     ' [s] - est. time required: ', EST_TIME_H, ' [h] ' , EST_TIME_M, ' [m]',&
+                     ' - number of particles: ', NP_TOT, &
+                     ' - number of collisions: ', NCOLL_TOT, &
+                     ' - number of reactions: ', NREAC_TOT
+
+      CALL ONLYMASTERPRINT1(PROC_ID, TRIM(stringTMP))
+      IF (STATS_LOG_UNIT /= 0) THEN
+         WRITE(STATS_LOG_UNIT, '(A)') TRIM(stringTMP)
+         CALL FLUSH(STATS_LOG_UNIT)
+      END IF
+
 
       ! ########### Start the time loop #################################
       tID = tID + 1
@@ -160,6 +213,10 @@ MODULE timecycle
             !                ' - coil current: ', COIL_CURRENT, ' [A]'
 
             CALL ONLYMASTERPRINT1(PROC_ID, TRIM(stringTMP))
+            IF (STATS_LOG_UNIT /= 0) THEN
+               WRITE(STATS_LOG_UNIT, '(A)') TRIM(stringTMP)
+               CALL FLUSH(STATS_LOG_UNIT)
+            END IF
 
          END IF
 

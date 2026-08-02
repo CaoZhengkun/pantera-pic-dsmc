@@ -1246,12 +1246,14 @@ MODULE initialization
          READ(STRARRAY(3), '(ES14.0)') GRID_BC(IPG)%WALL_RF_POTENTIAL
          READ(STRARRAY(4), '(ES14.0)') GRID_BC(IPG)%WALL_POTENTIAL
          READ(STRARRAY(5), '(ES14.0)') GRID_BC(IPG)%RF_FREQUENCY
+         IF (N_STR .GE. 6) READ(STRARRAY(6), '(ES14.0)') GRID_BC(IPG)%WALL_RF_PHASE
       ELSE IF (STRARRAY(2) == 'decoupled_rf_voltage') THEN
          GRID_BC(IPG)%FIELD_BC = DECOUPLED_RF_VOLTAGE_BC
          READ(STRARRAY(3), '(ES14.0)') GRID_BC(IPG)%WALL_RF_POTENTIAL
          READ(STRARRAY(4), '(ES14.0)') GRID_BC(IPG)%WALL_POTENTIAL
          READ(STRARRAY(5), '(ES14.0)') GRID_BC(IPG)%RF_FREQUENCY
          READ(STRARRAY(6), '(ES14.0)') GRID_BC(IPG)%CAPACITANCE
+         IF (N_STR .GE. 7) READ(STRARRAY(7), '(ES14.0)') GRID_BC(IPG)%WALL_RF_PHASE
       ELSE
          CALL ERROR_ABORT('Error in boundary condition definition.')
       END IF
@@ -2839,7 +2841,7 @@ MODULE initialization
                      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                   END DO
                END DO
-            ELSE ! Structured grid
+            ELSE ! Structured grid/
                ! Compute number of particles of this species per process to be created.
                IF (AXI) THEN
                   DOMAIN_VOLUME = 0.5*(XMAX-XMIN)*(YMAX**2-YMIN**2)*(ZMAX-ZMIN)

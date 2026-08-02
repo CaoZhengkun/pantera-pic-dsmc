@@ -6083,10 +6083,10 @@ MODULE fields
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == RF_VOLTAGE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL &
-                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT)
+                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT + GRID_BC(EDGE_PG)%WALL_RF_PHASE)
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == DECOUPLED_RF_VOLTAGE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL &
-                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT)
+                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT + GRID_BC(EDGE_PG)%WALL_RF_PHASE)
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == SPICE_NODE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%SPICE_NODE_POTENTIAL
                         END IF
@@ -6122,10 +6122,10 @@ MODULE fields
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == RF_VOLTAGE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL &
-                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT)
+                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT + GRID_BC(EDGE_PG)%WALL_RF_PHASE)
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == DECOUPLED_RF_VOLTAGE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL &
-                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT)
+                                     + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT + GRID_BC(EDGE_PG)%WALL_RF_PHASE)
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == SPICE_NODE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%SPICE_NODE_POTENTIAL
                         END IF
@@ -6169,10 +6169,10 @@ MODULE fields
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == RF_VOLTAGE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL &
-                                       + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT)
+                                       + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT + GRID_BC(EDGE_PG)%WALL_RF_PHASE)
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == DECOUPLED_RF_VOLTAGE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%WALL_POTENTIAL &
-                                       + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT)
+                                       + 0.5*GRID_BC(EDGE_PG)%WALL_RF_POTENTIAL*COS(2*PI*GRID_BC(EDGE_PG)%RF_FREQUENCY*tID*DT + GRID_BC(EDGE_PG)%WALL_RF_PHASE)
                         ELSE IF (GRID_BC(EDGE_PG)%FIELD_BC == SPICE_NODE_BC) THEN
                            POTENTIAL = GRID_BC(EDGE_PG)%SPICE_NODE_POTENTIAL
                         END IF

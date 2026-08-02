@@ -214,10 +214,11 @@ MODULE global
 
       INTEGER :: CONDUCTIVE_PART_ID = -1
 
-      REAL(KIND=8) :: EPS_REL
+      REAL(KIND=8) :: EPS_REL = 1.d0
 
       REAL(KIND=8) :: WALL_RF_POTENTIAL
       REAL(KIND=8) :: RF_FREQUENCY
+      REAL(KIND=8) :: WALL_RF_PHASE = 0.d0
       REAL(KIND=8) :: CAPACITANCE
 
       REAL(KIND=8) :: LAYER_THICKNESS
@@ -393,6 +394,7 @@ MODULE global
    INTEGER      :: CHECKS_EVERY = 1
    INTEGER      :: STATS_EVERY = 1
    INTEGER      :: TIMING_STATS_EVERY = 100
+   INTEGER      :: STATS_LOG_UNIT = 0 ! Log file unit for Stats_every/Timing_stats_every console echo (0 = not open)
    REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: CELL_FNUM
    LOGICAL      :: BOOL_RADIAL_WEIGHTING = .FALSE.
    INTEGER      :: JACOBIAN_TYPE = 1
@@ -675,7 +677,7 @@ MODULE global
    !!!!!!!!! Average flowfield !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    
-   CHARACTER*256                           :: FLOWFIELD_SAVE_PATH
+   CHARACTER*256                           :: FLOWFIELD_SAVE_PATH = ''
 
    REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: AVG_N
 

@@ -1339,44 +1339,90 @@ CONTAINS
          WRITE(*,*) '=======================     TIMING INFO     ======================='
          WRITE(*,*) '==================================================================='
          WRITE(*,*) 'Section             |    MAX    |    MIN    |    AVG    |  MAX/TOT'
+         IF (STATS_LOG_UNIT /= 0) THEN
+            WRITE(STATS_LOG_UNIT, '(A)') '==================================================================='
+            WRITE(STATS_LOG_UNIT, '(A)') '=======================     TIMING INFO     ======================='
+            WRITE(STATS_LOG_UNIT, '(A)') '==================================================================='
+            WRITE(STATS_LOG_UNIT, '(A)') 'Section             |    MAX    |    MIN    |    AVG    |  MAX/TOT'
+         END IF
 
          WRITE(*,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Misc:               ',  &
          TIMERS_MAX_AMONG_PROC(1),   ' s ', &
          TIMERS_MIN_AMONG_PROC(1),   ' s ', &
          TIMERS_AVG_AMONG_PROC(1),   ' s ', &
          100*TIMERS_MAX_AMONG_PROC(1)/TOTAL_ELAPSED, '%.'
+         IF (STATS_LOG_UNIT /= 0) &
+            WRITE(STATS_LOG_UNIT,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Misc:               ',  &
+            TIMERS_MAX_AMONG_PROC(1),   ' s ', &
+            TIMERS_MIN_AMONG_PROC(1),   ' s ', &
+            TIMERS_AVG_AMONG_PROC(1),   ' s ', &
+            100*TIMERS_MAX_AMONG_PROC(1)/TOTAL_ELAPSED, '%.'
 
          WRITE(*,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Field solution:     ',  &
          TIMERS_MAX_AMONG_PROC(2),   ' s ', &
          TIMERS_MIN_AMONG_PROC(2),   ' s ', &
          TIMERS_AVG_AMONG_PROC(2),   ' s ', &
          100*TIMERS_MAX_AMONG_PROC(2)/TOTAL_ELAPSED, '%.'
+         IF (STATS_LOG_UNIT /= 0) &
+            WRITE(STATS_LOG_UNIT,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Field solution:     ',  &
+            TIMERS_MAX_AMONG_PROC(2),   ' s ', &
+            TIMERS_MIN_AMONG_PROC(2),   ' s ', &
+            TIMERS_AVG_AMONG_PROC(2),   ' s ', &
+            100*TIMERS_MAX_AMONG_PROC(2)/TOTAL_ELAPSED, '%.'
 
          WRITE(*,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Particle movement:  ',  &
          TIMERS_MAX_AMONG_PROC(3),   ' s ', &
          TIMERS_MIN_AMONG_PROC(3),   ' s ', &
          TIMERS_AVG_AMONG_PROC(3),   ' s ', &
          100*TIMERS_MAX_AMONG_PROC(3)/TOTAL_ELAPSED, '%.'
+         IF (STATS_LOG_UNIT /= 0) &
+            WRITE(STATS_LOG_UNIT,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Particle movement:  ',  &
+            TIMERS_MAX_AMONG_PROC(3),   ' s ', &
+            TIMERS_MIN_AMONG_PROC(3),   ' s ', &
+            TIMERS_AVG_AMONG_PROC(3),   ' s ', &
+            100*TIMERS_MAX_AMONG_PROC(3)/TOTAL_ELAPSED, '%.'
 
          WRITE(*,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' File output:        ',  &
          TIMERS_MAX_AMONG_PROC(4),   ' s ', &
          TIMERS_MIN_AMONG_PROC(4),   ' s ', &
          TIMERS_AVG_AMONG_PROC(4),   ' s ', &
          100*TIMERS_MAX_AMONG_PROC(4)/TOTAL_ELAPSED, '%.'
+         IF (STATS_LOG_UNIT /= 0) &
+            WRITE(STATS_LOG_UNIT,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' File output:        ',  &
+            TIMERS_MAX_AMONG_PROC(4),   ' s ', &
+            TIMERS_MIN_AMONG_PROC(4),   ' s ', &
+            TIMERS_AVG_AMONG_PROC(4),   ' s ', &
+            100*TIMERS_MAX_AMONG_PROC(4)/TOTAL_ELAPSED, '%.'
 
          WRITE(*,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' MPI particle comm.: ',  &
          TIMERS_MAX_AMONG_PROC(5),   ' s ', &
          TIMERS_MIN_AMONG_PROC(5),   ' s ', &
          TIMERS_AVG_AMONG_PROC(5),   ' s ', &
          100*TIMERS_MAX_AMONG_PROC(5)/TOTAL_ELAPSED, '%.'
+         IF (STATS_LOG_UNIT /= 0) &
+            WRITE(STATS_LOG_UNIT,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' MPI particle comm.: ',  &
+            TIMERS_MAX_AMONG_PROC(5),   ' s ', &
+            TIMERS_MIN_AMONG_PROC(5),   ' s ', &
+            TIMERS_AVG_AMONG_PROC(5),   ' s ', &
+            100*TIMERS_MAX_AMONG_PROC(5)/TOTAL_ELAPSED, '%.'
 
          WRITE(*,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Collisions:         ',  &
          TIMERS_MAX_AMONG_PROC(6),   ' s ', &
          TIMERS_MIN_AMONG_PROC(6),   ' s ', &
          TIMERS_AVG_AMONG_PROC(6),   ' s ', &
          100*TIMERS_MAX_AMONG_PROC(6)/TOTAL_ELAPSED, '%.'
+         IF (STATS_LOG_UNIT /= 0) &
+            WRITE(STATS_LOG_UNIT,'(A21,F9.2,A3,F9.2,A3,F9.2,A3,F9.2,A2)') ' Collisions:         ',  &
+            TIMERS_MAX_AMONG_PROC(6),   ' s ', &
+            TIMERS_MIN_AMONG_PROC(6),   ' s ', &
+            TIMERS_AVG_AMONG_PROC(6),   ' s ', &
+            100*TIMERS_MAX_AMONG_PROC(6)/TOTAL_ELAPSED, '%.'
 
          WRITE(*,*) '===================================================================='
+         IF (STATS_LOG_UNIT /= 0) THEN
+            WRITE(STATS_LOG_UNIT, '(A)') '===================================================================='
+            CALL FLUSH(STATS_LOG_UNIT)
+         END IF
       END IF
 
       DEALLOCATE(ALL_TIMERS_ELAPSED)
