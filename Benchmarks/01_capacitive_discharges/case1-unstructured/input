@@ -54,9 +54,9 @@ Timestep:
 Number_of_timesteps:
 512000
 Stats_every:
-100
+400
 Timing_stats_every:
-1000
+4000
 RNG_seed:
 12345
 Save_initial_timestep:
@@ -102,7 +102,9 @@ Dump_grid_avgevery:
 Dump_grid_numavgs:
 12800
 
-! Boundary dumping is disabled because the current structured-grid path is unsafe.
+! Boundary VTK dumping is not required for the Turner diagnostics below.
+! turner_case1_diagnostics is written by CHECKS; turner_case1_grid_diagnostics
+! is written by GRID_SAVE.
 Dump_bound_start:
 1000000
 Dump_bound_avgevery:
@@ -116,8 +118,10 @@ Dump_part_every:
 
 Perform_checks:
 .TRUE.
+! Match the paper's final 32 RF-cycle averaging window:
+! 32 periods * 400 timesteps/period = 12800 timesteps.
 Checks_every:
-400
+12800
 
 Initial_particles:
 electrons 2.56e14 0.0 0.0 0.0 30000.0 30000.0 30000.0 0.0 0.0

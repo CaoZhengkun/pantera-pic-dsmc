@@ -328,6 +328,8 @@ MODULE timecycle
             
          END IF
 
+         CALL TALLY_TURNER_CASE1_TIMESTEP
+
          ! ########### Exchange particles among processes ##########################
 
          CALL TIMER_START(5)
@@ -1538,6 +1540,7 @@ MODULE timecycle
                         ! 1D unstructured: BOUNDCOLL = 1 (x=0) / 2 (x=L).
                         LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) = &
                         LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) + 1
+                        CALL TALLY_TURNER_CASE1_BOUNDARY(particles(IP), BOUNDCOLL)
 
                         IF (GRID_BC(FACE_PG)%DUMP_FLUXES .AND. (tID .GE. DUMP_PART_BOUND_START)) THEN
                            particleNOW = particles(IP)
@@ -2067,6 +2070,7 @@ MODULE timecycle
                   ! Tally the collision
                   LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) = &
                   LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) + 1
+                  CALL TALLY_TURNER_CASE1_BOUNDARY(particles(IP), BOUNDCOLL)
 
                   IF (BOOL_PERIODIC(BOUNDCOLL)) THEN
 
