@@ -1,33 +1,12 @@
-!===============================================================================
-!  Reaction definitions for He CCP benchmark (Turner et al., 2013)
-!  Reference: M. M. Turner et al., Phys. Plasmas 20, 013507 (2013)
-!
-!  Cross-section data must be obtained from the paper's supplementary
-!  material or from LXCat (www.lxcat.net) — Biagi database.
-!
-!  Reaction list:
-!    1) e + He  -> e + He         (elastic momentum-transfer)
-!    2) e + He  -> e + He         (excitation, 2^3S triplet, 19.82 eV)
-!    3) e + He  -> e + He         (excitation, 2^1S singlet, 20.61 eV)
-!    4) e + He  -> e + e + He+    (ionization, 24.59 eV, equal energy sharing)
-!    5) He+ + He -> He+ + He      (ion elastic / isotropic)
-!    6) He+ + He -> He + He+      (charge exchange / backward scatter)
-!===============================================================================
-
 e- + He --> e- + He
-lxcat 0.0 'reactions/electronhelium_elastic.lxcat'
-
+lxcat 0.0 'reactions/e_he_elastic.lxcat'
 e- + He --> e- + He
-lxcat 19.82 'reactions/electronhelium_excitation.lxcat'
-
+lxcat 19.82 'reactions/e_he_excitation_1.lxcat'
 e- + He --> e- + He
-lxcat 20.61 'reactions/electronhelium_singlet.lxcat'
-
+lxcat 20.61 'reactions/e_he_excitation_2.lxcat'
 e- + He --> e- + e- + He+
-lxcat 24.59 'reactions/electronhelium_ionization.lxcat'
-
+lxcat 24.587 'reactions/e_he_ionization.lxcat'
 He+ + He --> He+ + He
-lxcat 0.0 'reactions/ionhelium_elastic.lxcat'
-
-He+ + He --> He + He+
-lxcat 0.0 'reactions/ionhelium_cex.lxcat'
+lxcat 0.0 'reactions/heplus_he_isotropic.lxcat'
+He+ + He -CEX-> He + He+
+lxcat 0.0 'reactions/heplus_he_backward.lxcat'

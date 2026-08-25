@@ -218,7 +218,6 @@ MODULE global
 
       REAL(KIND=8) :: WALL_RF_POTENTIAL
       REAL(KIND=8) :: RF_FREQUENCY
-      REAL(KIND=8) :: WALL_RF_PHASE = 0.d0
       REAL(KIND=8) :: CAPACITANCE
 
       REAL(KIND=8) :: LAYER_THICKNESS
@@ -703,6 +702,7 @@ MODULE global
    LOGICAL                                   :: BOOL_DUMP_MOMENTS = .FALSE.
 
    REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: AVG_PHI
+   REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: AVG_E2X   ! time-averaged E_x^2 per cell (for V_sh,osc)
 
    INTEGER                                 :: BOUNDARY_AVG_CUMULATED
 
@@ -765,6 +765,7 @@ MODULE global
    
 
    REAL(KIND=8) :: FIELD_POWER
+   REAL(KIND=8), DIMENSION(100) :: FIELD_POWER_SPECIES = 0.d0   ! per-S_ID field power (W)
    REAL(KIND=8) :: COIL_CURRENT = 1.5d0
    REAL(KIND=8) :: FIELD_POWER_TARGET = 20.d0
    INTEGER :: FIELD_POWER_NUMAVG = 737
@@ -780,8 +781,10 @@ CONTAINS  ! @@@@@@@@@@@@@@@@@@@@@ SUBROUTINES @@@@@@@@@@@@@@@@@@@@@@@@
    
    SUBROUTINE NEWTYPE
    
-      INTEGER :: ii, extent_dpr, extent_int, extent_int8, extent_logical
-      INTEGER, DIMENSION(13) :: blocklengths, oldtypes, offsets
+      INTEGER :: ii
+      INTEGER(KIND=MPI_ADDRESS_KIND) :: extent_dpr, extent_int, extent_int8, extent_logical
+      INTEGER, DIMENSION(13) :: blocklengths, oldtypes
+      INTEGER(KIND=MPI_ADDRESS_KIND), DIMENSION(13) :: offsets
      
       CALL MPI_TYPE_EXTENT(MPI_DOUBLE_PRECISION, extent_dpr,  ierr)  
       CALL MPI_TYPE_EXTENT(MPI_INTEGER,          extent_int,  ierr)
@@ -803,7 +806,7 @@ CONTAINS  ! @@@@@@@@@@@@@@@@@@@@@ SUBROUTINES @@@@@@@@@@@@@@@@@@@@@@@@
       offsets(12) = offsets(11) + extent_int * blocklengths(11)
       offsets(13) = offsets(12) + extent_int8 * blocklengths(12)
       
-      CALL MPI_TYPE_STRUCT(13, blocklengths, offsets, oldtypes, MPI_PARTICLE_DATA_STRUCTURE, ierr)  
+      CALL MPI_TYPE_CREATE_STRUCT(13, blocklengths, offsets, oldtypes, MPI_PARTICLE_DATA_STRUCTURE, ierr)
       CALL MPI_TYPE_COMMIT(MPI_PARTICLE_DATA_STRUCTURE, ierr)   
    
    END SUBROUTINE NEWTYPE

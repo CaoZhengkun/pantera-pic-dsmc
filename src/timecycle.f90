@@ -1216,6 +1216,7 @@ MODULE timecycle
 
       REAL(KIND=8) :: VXPRE, VYPRE, VZPRE
       REAL(KIND=8) :: XI_PRE, XI_POST, P_REINJECTION
+      REAL(KIND=8) :: DPOW
 
       
       REAL(KIND=8) :: TOL = 1.0d-15
@@ -1241,6 +1242,7 @@ MODULE timecycle
       LOCAL_WALL_COLL_COUNT = 0
 
       FIELD_POWER = 0
+      FIELD_POWER_SPECIES = 0.d0
 
       ! OPEN(66341, FILE='washboarddump', POSITION='append', STATUS='unknown', ACTION='write')
 
@@ -1284,6 +1286,18 @@ MODULE timecycle
             particles(IP)%VX = V_NEW(1)
             particles(IP)%VY = V_NEW(2)
             particles(IP)%VZ = V_NEW(3)
+
+            ! Electric-field power deposition via kinetic-energy change (W per
+            ! macro-particle). Exact for Boris push (no B field); avoids the
+            ! leap-frog phase bias of q·v·E. Pure diagnostic.
+            IF (particles(IP)%DTRIM .GT. 0.d0) THEN
+               SPWT = SPECIES(particles(IP)%S_ID)%SPWT
+               DPOW = 0.5*SPECIES(particles(IP)%S_ID)%MOLECULAR_MASS &
+                    * (V_NEW(1)**2+V_NEW(2)**2+V_NEW(3)**2 - V_OLD(1)**2-V_OLD(2)**2-V_OLD(3)**2) &
+                    / particles(IP)%DTRIM
+               FIELD_POWER = FIELD_POWER + FNUM*SPWT*DPOW
+               FIELD_POWER_SPECIES(particles(IP)%S_ID) = FIELD_POWER_SPECIES(particles(IP)%S_ID) + FNUM*SPWT*DPOW
+            END IF
          END IF
 
 
@@ -1519,6 +1533,11 @@ MODULE timecycle
                   IF (FLUIDBOUNDARY) THEN
 
                      IF (FACE_PG .NE. -1) THEN
+
+                        ! Tally the boundary collision (per-species, per-boundary).
+                        ! 1D unstructured: BOUNDCOLL = 1 (x=0) / 2 (x=L).
+                        LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) = &
+                        LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) + 1
 
                         IF (GRID_BC(FACE_PG)%DUMP_FLUXES .AND. (tID .GE. DUMP_PART_BOUND_START)) THEN
                            particleNOW = particles(IP)

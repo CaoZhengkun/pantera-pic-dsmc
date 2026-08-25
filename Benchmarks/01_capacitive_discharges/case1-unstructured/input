@@ -1,0 +1,125 @@
+! Turner et al. (2013) CCP benchmark, case 1.
+! Full base calculation: 1280 RF periods, averaged over the final 32 periods.
+
+Dimensions:
+1
+Axisymmetric:
+.FALSE.
+Domain_limits:
+0.0 0.067 0.0 1.0 0.0 1.0
+Number_of_cells:
+128 1 1
+
+! MPI runs in the current src require the unstructured-grid partition path.
+Mesh_file:
+'case1.msh'
+
+Partition_style:
+stripsx
+
+Domain_periodicity:
+.FALSE. .TRUE. .TRUE.
+Domain_specular:
+.FALSE. .FALSE. .FALSE. .FALSE.
+Domain_diffuse:
+.FALSE. .FALSE. .FALSE. .FALSE.
+
+PIC_type:
+explicit
+
+! Turner specifies 450 V peak. PANTERA expects 900 V peak-to-peak.
+Domain_potential:
+0.0 0.0 0.0 0.0
+Domain_rf_amplitude:
+0.0 900.0 0.0 0.0
+Domain_rf_frequency:
+1.356e7
+
+Domain_type:
+cell fluid 1.0
+
+Boundary_condition:
+left dirichlet 0.0
+Boundary_condition:
+right rf_voltage 900.0 0.0 1.356e7
+Boundary_condition:
+left vacuum
+Boundary_condition:
+right vacuum
+
+Fnum:
+2.6171875e8
+Timestep:
+1.8436578171e-10
+Number_of_timesteps:
+512000
+Stats_every:
+100
+Timing_stats_every:
+1000
+RNG_seed:
+12345
+Save_initial_timestep:
+.FALSE.
+Binary_output:
+.FALSE.
+
+Species_file:
+'../helium.species'
+Def_mixture:
+electrons e- 1.0
+Def_mixture:
+ions He+ 1.0
+Def_mixture:
+Neutrals He 1.0
+
+Collision_type:
+MCC_VAHEDI
+MCC_background_mixture:
+Neutrals
+MCC_background_dens:
+9.64e20
+MCC_background_Ttra:
+300.0
+! PANTERA multiplies this rate coefficient [m3/s] by the gas density.
+MCC_null_rate:
+2.0e-13
+CS_table_oob:
+clamp
+Reactions_file:
+'../helium.react'
+Remove_particles_in_mixture:
+Neutrals
+
+All_output_path:
+'./dumps/'
+! At dt=1/(400f), each 32/f average contains 12800 time steps.
+! The final file at step 512000 is the paper's final averaging window.
+Dump_grid_start:
+0
+Dump_grid_avgevery:
+1
+Dump_grid_numavgs:
+12800
+
+! Boundary dumping is disabled because the current structured-grid path is unsafe.
+Dump_bound_start:
+1000000
+Dump_bound_avgevery:
+400
+Dump_bound_numavgs:
+1
+Dump_part_start:
+1000000
+Dump_part_every:
+1000000
+
+Perform_checks:
+.TRUE.
+Checks_every:
+400
+
+Initial_particles:
+electrons 2.56e14 0.0 0.0 0.0 30000.0 30000.0 30000.0 0.0 0.0
+Initial_particles:
+ions 2.56e14 0.0 0.0 0.0 300.0 300.0 300.0 0.0 0.0
