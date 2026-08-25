@@ -199,6 +199,7 @@ MODULE initialization
          IF (line=='RNG_seed:')                READ(in1,*) RNG_SEED_GLOBAL
          IF (line=='Perform_checks:')          READ(in1,*) PERFORM_CHECKS
          IF (line=='Checks_every:')            READ(in1,*) CHECKS_EVERY
+         IF (line=='CCP1D:')                   READ(in1,*) CCP1D_DIAGNOSTICS, CCP1D_DIAGNOSTICS_EVERY
          IF (line=='Stats_every:')             READ(in1,*) STATS_EVERY
          IF (line=='Timing_stats_every:')      READ(in1,*) TIMING_STATS_EVERY
          IF (line=='Epsilon_scaling:')         READ(in1,*) EPS_SCALING
@@ -442,6 +443,10 @@ MODULE initialization
 
       CLOSE(in1) ! Close input file
 
+      IF (CCP1D_DIAGNOSTICS .AND. CCP1D_DIAGNOSTICS_EVERY .LE. 0) THEN
+         CALL ERROR_ABORT('CCP1D output interval must be greater than zero when CCP1D diagnostics are enabled.')
+      END IF
+
       
       CALL INPUT_DATA_SANITY_CHECK ! Check the values that were read
       CALL PRINTINPUT              ! Print values
@@ -501,6 +506,12 @@ MODULE initialization
 
          string = 'RNG seed (global):'
          WRITE(*,'(A5,A50,I9)') '     ', string, RNG_SEED_GLOBAL
+
+         string = 'CCP1D diagnostics bool [T/F]:'
+         WRITE(*,'(A5,A50,L)') '     ', string, CCP1D_DIAGNOSTICS
+
+         string = 'CCP1D diagnostics every:'
+         WRITE(*,'(A5,A50,I9)') '     ', string, CCP1D_DIAGNOSTICS_EVERY
 
          ! ~~~~ Collisions ~~~~
          WRITE(*,*) '  =========== Collisions ============================'

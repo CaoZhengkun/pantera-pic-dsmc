@@ -328,7 +328,7 @@ MODULE timecycle
             
          END IF
 
-         CALL TALLY_TURNER_CASE1_TIMESTEP
+         IF (CCP1D_DIAGNOSTICS) CALL TALLY_CCP_1D_TIMESTEP
 
          ! ########### Exchange particles among processes ##########################
 
@@ -399,6 +399,10 @@ MODULE timecycle
          CALL DUMP_TRAJECTORY_FILE(tID)
          CALL TIMER_STOP(4)
 
+         ! ########### Save CCP 1D runtime diagnostics #############################
+         IF (CCP1D_DIAGNOSTICS .AND. CCP1D_DIAGNOSTICS_EVERY .GT. 0) THEN
+            IF (MOD(tID, CCP1D_DIAGNOSTICS_EVERY) .EQ. 0) CALL SAVE_CCP_1D_DIAGNOSTICS
+         END IF
 
          ! ########### Perform the conservation checks ###################################
          IF (PERFORM_CHECKS .AND. MOD(tID, CHECKS_EVERY) .EQ. 0) CALL CHECKS
@@ -1540,7 +1544,7 @@ MODULE timecycle
                         ! 1D unstructured: BOUNDCOLL = 1 (x=0) / 2 (x=L).
                         LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) = &
                         LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) + 1
-                        CALL TALLY_TURNER_CASE1_BOUNDARY(particles(IP), BOUNDCOLL)
+                        CALL TALLY_CCP_1D_BOUNDARY(particles(IP), BOUNDCOLL)
 
                         IF (GRID_BC(FACE_PG)%DUMP_FLUXES .AND. (tID .GE. DUMP_PART_BOUND_START)) THEN
                            particleNOW = particles(IP)
@@ -2070,7 +2074,7 @@ MODULE timecycle
                   ! Tally the collision
                   LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) = &
                   LOCAL_BOUNDARY_COLL_COUNT(BOUNDCOLL+4*(particles(IP)%S_ID-1)) + 1
-                  CALL TALLY_TURNER_CASE1_BOUNDARY(particles(IP), BOUNDCOLL)
+                  CALL TALLY_CCP_1D_BOUNDARY(particles(IP), BOUNDCOLL)
 
                   IF (BOOL_PERIODIC(BOUNDCOLL)) THEN
 

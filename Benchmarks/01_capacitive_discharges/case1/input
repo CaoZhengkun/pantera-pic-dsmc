@@ -1,139 +1,129 @@
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!!!  Pantera input file                                              !!!!!!!!
-!!!!  Case 1 — Turner et al. (2013) CCP He benchmark                   !!!!!!!!
-!!!!  Phys. Plasmas 20, 013507                                         !!!!!!!!
-!!!!                                                                   !!!!!!!!
-!!!!  Geometry:   1D Cartesian, 6.7 cm gap, 13.56 MHz RF               !!!!!!!!
-!!!!  Pressure:   n_g = 9.64e20 m^-3 (~30 Torr He at 300 K)           !!!!!!!!
-!!!!  Voltage:    V_RF = 450 V (peak), V(0)=0 (cos phase)              !!!!!!!!
-!!!!  Grid:       Nx = 128, ∆x = λ_D/1.43                             !!!!!!!!
-!!!!  Particles:  N_c = 512 mac/cell, Fnum = 1.37e5                   !!!!!!!!
-!!!!  Timestep:   ∆t = 1/(400f) = 1.844e-10 s, N_steps = 512,000      !!!!!!!!
-!!!!                                                                   !!!!!!!!
-!!!!  All units are SI [m, kg, s, K, V]                                !!!!!!!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-! ========= Computational domain and grid ===========
+! Turner et al. (2013) CCP benchmark, case 1.
+! Full base calculation: 1280 RF periods, averaged over the final 32 periods.
 
 Dimensions:
 1
 Axisymmetric:
 .FALSE.
-
-! 1D in x with 1 cell in y — parallel plates at x = 0 and x = 0.067 m
 Domain_limits:
-0.0  0.067  0.0  5.2344e-4  -0.5  0.5   ! xmin xmax ymin ymax zmin zmax
-
+0.0 0.067 0.0 1.0 0.0 1.0
 Number_of_cells:
-128  1  1
+128 1 1
 
+! MPI runs in the current src require the unstructured-grid partition path.
 Mesh_file:
 'case1.msh'
 
+Partition_style:
+stripsx
 
-! ========= Numerical parameters =====================
+Domain_periodicity:
+.FALSE. .TRUE. .TRUE.
+Domain_specular:
+.FALSE. .FALSE. .FALSE. .FALSE.
+Domain_diffuse:
+.FALSE. .FALSE. .FALSE. .FALSE.
 
-Fnum:
-1.37e5
-Timestep:
-1.8436e-10
-Number_of_timesteps:
-512000
 PIC_type:
 explicit
 
-Stats_every:
-1000
+! Turner specifies 450 V peak. PANTERA expects 900 V peak-to-peak.
+Domain_potential:
+0.0 0.0 0.0 0.0
+Domain_rf_amplitude:
+0.0 900.0 0.0 0.0
+Domain_rf_frequency:
+1.356e7
 
-! === Collisions — MCC with He background ===========
+Domain_type:
+cell fluid 1.0
+
+Boundary_condition:
+left dirichlet 0.0
+Boundary_condition:
+right rf_voltage 900.0 0.0 1.356e7
+Boundary_condition:
+left vacuum
+Boundary_condition:
+right vacuum
+
+Fnum:
+2.6171875e8
+Timestep:
+1.8436578171e-10
+Number_of_timesteps:
+512000
+Stats_every:
+400
+Timing_stats_every:
+4000
+RNG_seed:
+12345
+Save_initial_timestep:
+.FALSE.
+Binary_output:
+.FALSE.
+
+Species_file:
+'../helium.species'
+Def_mixture:
+electrons e- 1.0
+Def_mixture:
+ions He+ 1.0
+Def_mixture:
+Neutrals He 1.0
 
 Collision_type:
 MCC_VAHEDI
-
+MCC_background_mixture:
+Neutrals
 MCC_background_dens:
 9.64e20
 MCC_background_Ttra:
 300.0
-MCC_background_mixture:
-background
+! PANTERA multiplies this rate coefficient [m3/s] by the gas density.
 MCC_null_rate:
-1e-10
-
-Reactions_file:
-'../helium.react'
-
+2.0e-13
 CS_table_oob:
 clamp
-
-! ========= Multi-species ============================
-
-Species_file:
-'../helium.species'
-
-Def_mixture:
-electrons e- 1.0
-
-Def_mixture:
-ions He+ 1.0
-Def_mixture:
-background He 1.0
-
-Remove_mixture:
-background
-
-
-! ========= Boundary conditions ======================
-
-! Left electrode (x = 0):   grounded, φ = 0 (DC + RF = 0)
-! Right electrode (x = L):  RF driven, φ = 0 + 450·sin(2π·13.56e6·t)
-
-! Potential BCs via physical groups in the mesh file
-Boundary_condition:
-left dirichlet 0.0
-
-Boundary_condition:
-right rf_voltage 900.0 0.0 13.56e6
-
-
-! ========= Initial conditions =======================
-
-! Initial uniform plasma: n0 = 2.56e14 m^-3
-! Electron temperature: T_e = 30000 K (~2.585 eV)
-! Ion temperature:      T_i = 300 K
-! Zero drift velocity
-
-Initial_particles:
-electrons  2.56e14  0.0  0.0  0.0  30000.  30000.  30000.  0.  0.
-
-Initial_particles:
-ions       2.56e14  0.0  0.0  0.0    300.    300.    300.  0.  0.
-
-
-! ========= Output paths =============================
+Reactions_file:
+'../helium.react'
+Remove_particles_in_mixture:
+Neutrals
 
 All_output_path:
 './dumps/'
-
-! Grid output averaged over last 32 RF cycles (= 12800 steps)
+! At dt=1/(400f), each 32/f average contains 12800 time steps.
+! The final file at step 512000 is the paper's final averaging window.
 Dump_grid_start:
-499200
+0
 Dump_grid_avgevery:
 1
 Dump_grid_numavgs:
 12800
 
+! Boundary VTK dumping is not required for the Turner CCP1D diagnostics.
 Dump_bound_start:
-499200
+1000000
 Dump_bound_avgevery:
-1
+400
 Dump_bound_numavgs:
-12800
-
+1
 Dump_part_start:
 1000000
+Dump_part_every:
+1000000
+
+! Runtime CCP1D diagnostics use their own averaging/output cadence.
+CCP1D:
+.TRUE. 12800
 
 Perform_checks:
-.FALSE.
+.TRUE.
+Checks_every:
+12800
 
-! ========= End of input file ========================
+Initial_particles:
+electrons 2.56e14 0.0 0.0 0.0 30000.0 30000.0 30000.0 0.0 0.0
+Initial_particles:
+ions 2.56e14 0.0 0.0 0.0 300.0 300.0 300.0 0.0 0.0
