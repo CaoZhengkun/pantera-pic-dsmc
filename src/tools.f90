@@ -412,13 +412,17 @@ CONTAINS
 
       INTEGER, INTENT(IN) :: TIMESTEP
       CHARACTER(LEN=512)  :: filename
+      CHARACTER(LEN=256)  :: restart_path
       INTEGER :: ios
 
       REAL(KIND=8) :: XP, YP, ZP, VX, VY, VZ, EROT, EVIB, DTRIM
       INTEGER      :: S_ID, IC
       TYPE(PARTICLE_DATA_STRUCTURE) :: particleNOW
       character(len=100) :: iomsg
-      WRITE(filename, "(A,A,I0.5,A6,I0.8)") TRIM(ADJUSTL(PARTDUMP_SAVE_PATH)), "proc_", PROC_ID, "_time_", TIMESTEP ! Compose filename
+      restart_path = PARTDUMP_SAVE_PATH
+      IF (LEN_TRIM(PARTRESTART_LOAD_PATH) > 0) restart_path = PARTRESTART_LOAD_PATH
+      WRITE(filename, "(A,A,I0.5,A6,I0.8)") TRIM(ADJUSTL(restart_path)), &
+         "proc_", PROC_ID, "_time_", TIMESTEP ! Compose filename
 
       ! Open file for reading
       IF (BOOL_BINARY_OUTPUT) THEN

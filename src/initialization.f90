@@ -243,6 +243,7 @@ MODULE initialization
          IF (line=='Flowfield_output:')        READ(in1,*) FLOWFIELD_SAVE_PATH
          IF (line=='Boundary_output:')         READ(in1,*) BOUNDARY_SAVE_PATH
          IF (line=='Particle_dump_output:')    READ(in1,*) PARTDUMP_SAVE_PATH
+         IF (line=='Particle_restart_input:')  READ(in1,*) PARTRESTART_LOAD_PATH
          IF (line=='Trajectory_dump_output:')  READ(in1,*) TRAJDUMP_SAVE_PATH
          IF (line=='Fluxes_dump_output:')      READ(in1,*) FLUXDUMP_SAVE_PATH
          IF (line=='Checks_output:')           READ(in1,*) CHECKS_SAVE_PATH
