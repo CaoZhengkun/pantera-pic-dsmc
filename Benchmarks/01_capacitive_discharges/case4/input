@@ -53,6 +53,11 @@ Timestep:
 2.3045722714e-11
 Number_of_timesteps:
 49152000
+! To resume an interrupted run, uncomment Restart and set it to the last
+! completed particle checkpoint timestep, e.g. 1024000, 2048000, ...
+! Restart requires the same number of MPI processes used to write the checkpoint.
+Restart:
+8192000
 Stats_every:
 3200
 Timing_stats_every:
@@ -93,6 +98,10 @@ Neutrals
 
 All_output_path:
 './dumps/'
+! For restart, Particle_dump_output must point to the existing run directory
+! containing proc_XXXXX_time_TTTTTTTT files, and must appear after All_output_path.
+Particle_dump_output:
+'./dumps/run_20260827_150025/'
 ! At dt=1/(3200f), each 32/f average contains 102400 time steps.
 ! The final file at step 49152000 is the paper's final averaging window.
 Dump_grid_start:
@@ -110,9 +119,13 @@ Dump_bound_avgevery:
 Dump_bound_numavgs:
 1
 Dump_part_start:
-100000000
+1024000
 Dump_part_every:
-100000000
+1024000
+Dump_part_fracsample:
+1.0
+Load_part_fracsample:
+1.0
 
 ! Runtime CCP1D diagnostics use their own averaging/output cadence.
 CCP1D:
