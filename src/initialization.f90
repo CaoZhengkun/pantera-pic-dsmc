@@ -27,10 +27,62 @@ MODULE initialization
    USE grid_and_partition
    USE mt19937_64
    USE velocity_distribution
+   USE surface_emission_utils, ONLY: SEEM_OK, parse_surface_current_definition, &
+                                     parse_secondary_emission_definition, read_see_yield_table
+   USE external_field, ONLY: LOAD_EXTERNAL_B_FIELD_FILE, EXTERNAL_FIELD_OK
+   USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
 
    IMPLICIT NONE
 
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_PARSE_OK = 0
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_PARSE_BAD_COUNT = 1
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_PARSE_BAD_VALUE = 2
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_PARSE_BAD_DIMS = 3
+
+   PUBLIC :: PARSE_PERIODIC_TRANSLATION
+
    CONTAINS
+
+   SUBROUTINE PARSE_PERIODIC_TRANSLATION(DIMS, TOKENS, NUM_TOKENS, TRANSLATEVEC, ERROR_CODE)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: DIMS, NUM_TOKENS
+      CHARACTER(LEN=*), DIMENSION(:), INTENT(IN) :: TOKENS
+      REAL(KIND=8), DIMENSION(3), INTENT(OUT) :: TRANSLATEVEC
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+
+      INTEGER :: I, IOS
+
+      TRANSLATEVEC = 0.d0
+      ERROR_CODE = PERIODIC_PARSE_OK
+
+      IF (DIMS < 1 .OR. DIMS > 3) THEN
+         ERROR_CODE = PERIODIC_PARSE_BAD_DIMS
+         RETURN
+      END IF
+
+      ! Tokens 1 and 2 are the physical group and boundary type.
+      IF (NUM_TOKENS /= DIMS + 2 .OR. SIZE(TOKENS) < NUM_TOKENS) THEN
+         ERROR_CODE = PERIODIC_PARSE_BAD_COUNT
+         RETURN
+      END IF
+
+      DO I = 1, DIMS
+         READ(TOKENS(I+2), *, IOSTAT=IOS) TRANSLATEVEC(I)
+         IF (IOS /= 0) THEN
+            TRANSLATEVEC = 0.d0
+            ERROR_CODE = PERIODIC_PARSE_BAD_VALUE
+            RETURN
+         END IF
+         IF (.NOT. IEEE_IS_FINITE(TRANSLATEVEC(I))) THEN
+            TRANSLATEVEC = 0.d0
+            ERROR_CODE = PERIODIC_PARSE_BAD_VALUE
+            RETURN
+         END IF
+      END DO
+
+   END SUBROUTINE PARSE_PERIODIC_TRANSLATION
 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! SUBORUTINE READINPUT -> reads input file and initializes variables !!!!!!!!!!!
@@ -151,6 +203,26 @@ MODULE initialization
             CALL DEF_BOUNDARY_EMIT(BC_DEFINITION)
          END IF
 
+         IF (line=='Boundary_current_density_emit:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_BOUNDARY_CURRENT_DENSITY_EMIT(BC_DEFINITION)
+         END IF
+
+         IF (line=='Particle_source_tag:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_PARTICLE_SOURCE_TAG(BC_DEFINITION)
+         END IF
+
+         IF (line=='Extraction_group:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_EXTRACTION_GROUP(BC_DEFINITION)
+         END IF
+
+         IF (line=='Secondary_electron_emission:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_SECONDARY_ELECTRON_EMISSION(BC_DEFINITION)
+         END IF
+
          IF (line=='Thermionic_emit:') THEN
             READ(in1,'(A)') BC_DEFINITION
             CALL DEF_THERMIONIC_EMIT(BC_DEFINITION)
@@ -177,6 +249,7 @@ MODULE initialization
          END IF
 
          IF (line=='External_B_field:') READ(in1,*) EXTERNAL_B_FIELD(1), EXTERNAL_B_FIELD(2), EXTERNAL_B_FIELD(3)
+         IF (line=='External_B_field_file:') READ(in1,*) EXTERNAL_B_FIELD_FILE
          IF (line=='External_E_field:') READ(in1,*) EXTERNAL_E_FIELD(1), EXTERNAL_E_FIELD(2), EXTERNAL_E_FIELD(3)
 
          IF (line=='Magnetic_dipole_field:') THEN
@@ -361,11 +434,35 @@ MODULE initialization
             READ(in1,'(A)') BC_DEFINITION
             CALL DEF_INITIAL_PARTICLES(BC_DEFINITION)
          END IF
+         IF (line=='Source_initial_particles:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_INITIAL_PARTICLES(BC_DEFINITION, .TRUE.)
+         END IF
 
          ! ~~~~~~~~~~~~~  Continuous injection in the volume  ~~~~~~~~~~~~~~~~~
          IF (line=='Volume_inject:') THEN
             READ(in1,'(A)') BC_DEFINITION
             CALL DEF_VOLUME_INJECT(BC_DEFINITION)
+         END IF
+
+         IF (line=='Source_region:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_SOURCE_REGION(BC_DEFINITION)
+         END IF
+
+         IF (line=='Source_thermalization:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_SOURCE_THERMALIZATION(BC_DEFINITION)
+         END IF
+
+         IF (line=='Source_reinjection:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_SOURCE_REINJECTION(BC_DEFINITION)
+         END IF
+
+         IF (line=='Source_constant_flux:') THEN
+            READ(in1,'(A)') BC_DEFINITION
+            CALL DEF_SOURCE_CONSTANT_FLUX(BC_DEFINITION)
          END IF
 
          ! ~~~~~~~~~~~~~  Particle deletion  ~~~~~~~~~~~~~~~~~
@@ -461,7 +558,8 @@ MODULE initialization
    SUBROUTINE PRINTINPUT
 
       IMPLICIT NONE
-      INTEGER :: J, K, IFLUID
+      INTEGER :: I, J, K, IFLUID
+      LOGICAL :: SEEN_SOURCE
       CHARACTER(LEN=512) string
 
       IF (PROC_ID == 0) THEN ! Only master prints
@@ -489,6 +587,25 @@ MODULE initialization
 
             string = 'Domain periodicity along X, Y, Z [T/F]: '
             WRITE(*,'(A5,A50,L4,L4,L4)')'    ',string,BOOL_X_PERIODIC,BOOL_Y_PERIODIC,BOOL_Z_PERIODIC
+         END IF
+
+         IF (LEN_TRIM(EXTERNAL_B_FIELD_FILE) > 0) THEN
+            WRITE(*,'(A5,A,A)') '    ', 'External magnetic-field CSV [SI]: ', TRIM(EXTERNAL_B_FIELD_FILE)
+         ELSE
+            WRITE(*,'(A5,A,ES14.3,ES14.3,ES14.3)') '    ', &
+               'External magnetic field [T]: ', EXTERNAL_B_FIELD(1), EXTERNAL_B_FIELD(2), EXTERNAL_B_FIELD(3)
+         END IF
+
+         IF (N_PARTICLE_SOURCE_MAPPINGS > 0) THEN
+            WRITE(*,*) '  =========== Particle source diagnostic mappings ================'
+            DO I = 1, N_PARTICLE_SOURCE_MAPPINGS
+               WRITE(*,'(A5,A,A,A)') '    ', TRIM(GRID_BC(PARTICLE_SOURCE_MAPPINGS(I)%PHYSICAL_GROUP)%PHYSICAL_GROUP_NAME), &
+                  ' -> ', TRIM(PARTICLE_SOURCE_TAG_NAME(PARTICLE_SOURCE_MAPPINGS(I)%SOURCE_TAG))
+            END DO
+         END IF
+         IF (EXTRACTION_GROUP > 0) THEN
+            WRITE(*,'(A5,A,A)') '    ', 'Extraction group: ', &
+               TRIM(GRID_BC(EXTRACTION_GROUP)%PHYSICAL_GROUP_NAME)
          END IF
   
          ! ~~~~ Numerical settings ~~~~
@@ -615,6 +732,39 @@ MODULE initialization
                END IF 
             END DO
 
+         END IF
+
+         IF (N_SURFACE_CURRENT_EMIT_TASKS > 0) THEN
+            WRITE(*,*) '  =========== Fixed surface current-density emission =================='
+            DO I = 1, N_SURFACE_CURRENT_EMIT_TASKS
+               SEEN_SOURCE = .FALSE.
+               DO J = 1, I-1
+                  IF (SURFACE_CURRENT_EMIT_TASKS(J)%PHYSICAL_GROUP == &
+                      SURFACE_CURRENT_EMIT_TASKS(I)%PHYSICAL_GROUP .AND. &
+                      SURFACE_CURRENT_EMIT_TASKS(J)%SPECIES_ID == &
+                      SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID) SEEN_SOURCE = .TRUE.
+               END DO
+               IF (SEEN_SOURCE) CYCLE
+               WRITE(*,*) '  Group: ', TRIM(GRID_BC(SURFACE_CURRENT_EMIT_TASKS(I)%PHYSICAL_GROUP)%PHYSICAL_GROUP_NAME), &
+                    ' species: ', TRIM(SPECIES(SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID)%NAME), &
+                    ' J [A/m2]: ', SURFACE_CURRENT_EMIT_TASKS(I)%CURRENT_DENSITY, &
+                    ' T [K]: ', SURFACE_CURRENT_EMIT_TASKS(I)%TEMPERATURE, &
+                    ' VDF: ', TRIM(SURFACE_CURRENT_EMIT_TASKS(I)%VDF_NAME)
+            END DO
+            WRITE(*,*) '  Per-face fractional residuals start at zero for this run/restart window.'
+         END IF
+
+         IF (N_SECONDARY_EMISSION_MODELS > 0) THEN
+            WRITE(*,*) '  =========== Secondary-electron emission ============================'
+            DO I = 1, N_SECONDARY_EMISSION_MODELS
+               WRITE(*,*) '  Group: ', TRIM(GRID_BC(SECONDARY_EMISSION_MODELS(I)%PHYSICAL_GROUP)%PHYSICAL_GROUP_NAME), &
+                    ' incident: ', TRIM(SPECIES(SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID)%NAME), &
+                    ' electron: ', TRIM(SPECIES(SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID)%NAME), &
+                    ' table: ', TRIM(SECONDARY_EMISSION_MODELS(I)%TABLE_FILE), &
+                    ' energy range [eV]: ', MINVAL(SECONDARY_EMISSION_MODELS(I)%INCIDENT_ENERGY_EV), &
+                    MAXVAL(SECONDARY_EMISSION_MODELS(I)%INCIDENT_ENERGY_EV), &
+                    ' secondary T [K]: ', SECONDARY_EMISSION_MODELS(I)%SECONDARY_TEMPERATURE
+            END DO
          END IF
 
       END IF
@@ -1174,8 +1324,9 @@ MODULE initialization
 
       CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
 
-      INTEGER :: N_STR, I, IPG
+      INTEGER :: N_STR, I, IPG, PARSE_STATUS
       CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      CHARACTER(LEN=256) :: ERROR_MESSAGE
 
 
       CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
@@ -1242,9 +1393,24 @@ MODULE initialization
       !!! BCs for both particles and field
       ELSE IF (STRARRAY(2) == 'periodic_master') THEN
          GRID_BC(IPG)%PARTICLE_BC = PERIODIC_MASTER
-         GRID_BC(IPG)%FIELD_BC = PERIODIC_SLAVE_BC
-         READ(STRARRAY(3), '(ES14.0)') GRID_BC(IPG)%TRANSLATEVEC(1)
-         READ(STRARRAY(3), '(ES14.0)') GRID_BC(IPG)%TRANSLATEVEC(2)
+         GRID_BC(IPG)%FIELD_BC = PERIODIC_MASTER_BC
+         CALL PARSE_PERIODIC_TRANSLATION(DIMS, STRARRAY, N_STR, GRID_BC(IPG)%TRANSLATEVEC, PARSE_STATUS)
+         IF (PARSE_STATUS /= 0) THEN
+            SELECT CASE (PARSE_STATUS)
+            CASE (PERIODIC_PARSE_BAD_COUNT)
+               WRITE(ERROR_MESSAGE,'(A,A,A,I0,A)') 'Periodic master group "', &
+                  TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), '" requires ', DIMS, ' translation component(s).'
+            CASE (PERIODIC_PARSE_BAD_VALUE)
+               WRITE(ERROR_MESSAGE,'(A,A,A)') 'Periodic master group "', &
+                  TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), '" has a non-finite or invalid translation component.'
+            CASE (PERIODIC_PARSE_BAD_DIMS)
+               WRITE(ERROR_MESSAGE,'(A,I0,A)') 'Periodic master requires Dimensions 1, 2 or 3; got ', DIMS, '.'
+            CASE DEFAULT
+               ERROR_MESSAGE = 'Invalid periodic master translation vector.'
+            END SELECT
+            CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+            RETURN
+         END IF
 
          ! DO J = 1, U2D_GRID%NUM_CELLS
          !    DO K = 1, 3
@@ -1671,7 +1837,7 @@ MODULE initialization
       CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
 
       CHARACTER*64 :: MIX_NAME, VDF_NAME
-      INTEGER      :: MIX_ID, I, IC, IPG
+      INTEGER      :: MIX_ID, I, IC, IPG, N_EMIT_TASKS_START
       TYPE(EMIT_TASK_DATA_STRUCTURE), DIMENSION(:), ALLOCATABLE :: TEMP_EMIT_TASKS
       CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE :: TEMP_VDF
 
@@ -1684,6 +1850,7 @@ MODULE initialization
          IF (GRID_BC(I)%PHYSICAL_GROUP_NAME == STRARRAY(1)) IPG = I
       END DO
       IF (IPG == -1) CALL ERROR_ABORT('Error in boundary emit definition. Group name not found.')
+      N_EMIT_TASKS_START = N_EMIT_TASKS
 
 
       READ(STRARRAY(2),'(A10)') MIX_NAME
@@ -1814,7 +1981,420 @@ MODULE initialization
       
 
 
+      DO I = N_EMIT_TASKS_START + 1, N_EMIT_TASKS
+         EMIT_TASKS(I)%PHYSICAL_GROUP = IPG
+      END DO
+
    END SUBROUTINE DEF_BOUNDARY_EMIT
+
+
+   SUBROUTINE DEF_PARTICLE_SOURCE_TAG(DEFINITION)
+
+      IMPLICIT NONE
+
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      TYPE(PARTICLE_SOURCE_MAPPING), DIMENSION(:), ALLOCATABLE :: TEMP_MAPPINGS
+      INTEGER :: N_STR, I, IPG, SOURCE_TAG
+
+      CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
+      IF (N_STR /= 2) THEN
+         CALL ERROR_ABORT('Particle_source_tag expects: physical_group PG_PLANE|PG_CONE.')
+         RETURN
+      END IF
+
+      IPG = -1
+      DO I = 1, N_GRID_BC
+         IF (TRIM(GRID_BC(I)%PHYSICAL_GROUP_NAME) == TRIM(STRARRAY(1))) IPG = I
+      END DO
+      IF (IPG < 1) THEN
+         CALL ERROR_ABORT('Particle_source_tag physical group was not found.')
+         RETURN
+      END IF
+
+      SOURCE_TAG = PARTICLE_SOURCE_TAG_FROM_NAME(TRIM(STRARRAY(2)))
+      IF (SOURCE_TAG /= PARTICLE_SOURCE_PG_PLANE .AND. SOURCE_TAG /= PARTICLE_SOURCE_PG_CONE) THEN
+         CALL ERROR_ABORT('Particle_source_tag must use PG_PLANE or PG_CONE.')
+         RETURN
+      END IF
+
+      IF (ALLOCATED(PARTICLE_SOURCE_MAPPINGS)) THEN
+         DO I = 1, N_PARTICLE_SOURCE_MAPPINGS
+            IF (PARTICLE_SOURCE_MAPPINGS(I)%PHYSICAL_GROUP == IPG) THEN
+               CALL ERROR_ABORT('Particle_source_tag physical group was defined more than once.')
+               RETURN
+            END IF
+         END DO
+         ALLOCATE(TEMP_MAPPINGS(N_PARTICLE_SOURCE_MAPPINGS+1))
+         IF (N_PARTICLE_SOURCE_MAPPINGS > 0) &
+            TEMP_MAPPINGS(1:N_PARTICLE_SOURCE_MAPPINGS) = PARTICLE_SOURCE_MAPPINGS
+         CALL MOVE_ALLOC(TEMP_MAPPINGS, PARTICLE_SOURCE_MAPPINGS)
+      ELSE
+         ALLOCATE(PARTICLE_SOURCE_MAPPINGS(1))
+      END IF
+
+      N_PARTICLE_SOURCE_MAPPINGS = N_PARTICLE_SOURCE_MAPPINGS + 1
+      PARTICLE_SOURCE_MAPPINGS(N_PARTICLE_SOURCE_MAPPINGS)%PHYSICAL_GROUP = IPG
+      PARTICLE_SOURCE_MAPPINGS(N_PARTICLE_SOURCE_MAPPINGS)%SOURCE_TAG = SOURCE_TAG
+
+   END SUBROUTINE DEF_PARTICLE_SOURCE_TAG
+
+
+   SUBROUTINE DEF_EXTRACTION_GROUP(DEFINITION)
+
+      IMPLICIT NONE
+
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      INTEGER :: N_STR, I, IPG
+
+      CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
+      IF (N_STR /= 1) THEN
+         CALL ERROR_ABORT('Extraction_group expects one physical-group name.')
+         RETURN
+      END IF
+      IF (EXTRACTION_GROUP /= -1) THEN
+         CALL ERROR_ABORT('Extraction_group may be defined only once.')
+         RETURN
+      END IF
+
+      IPG = -1
+      DO I = 1, N_GRID_BC
+         IF (TRIM(GRID_BC(I)%PHYSICAL_GROUP_NAME) == TRIM(STRARRAY(1))) IPG = I
+      END DO
+      IF (IPG < 1) THEN
+         CALL ERROR_ABORT('Extraction_group physical group was not found.')
+         RETURN
+      END IF
+
+      EXTRACTION_GROUP = IPG
+
+   END SUBROUTINE DEF_EXTRACTION_GROUP
+
+   SUBROUTINE DEF_BOUNDARY_CURRENT_DENSITY_EMIT(DEFINITION)
+
+      IMPLICIT NONE
+
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=256) :: GROUP_NAME
+      CHARACTER(LEN=64) :: SPECIES_NAME, VDF_NAME
+      CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE :: TEMP_VDF
+      TYPE(SURFACE_CURRENT_EMIT_TASK), DIMENSION(:), ALLOCATABLE :: NEW_TASKS
+      REAL(KIND=8) :: CURRENT_DENSITY, TEMPERATURE, AREA
+      INTEGER :: IERR, IPG, ISPECIES, I, IC, IFACE, N_ADDED, N_EXISTING, EXPECTED_FACES
+      INTEGER :: TASK_INDEX
+
+      CALL PARSE_SURFACE_CURRENT_DEFINITION(DEFINITION, GROUP_NAME, SPECIES_NAME, &
+           CURRENT_DENSITY, TEMPERATURE, VDF_NAME, IERR)
+      IF (IERR /= SEEM_OK) THEN
+         CALL ERROR_ABORT('Invalid Boundary_current_density_emit definition; expected: '// &
+                          'physical_group species J_A_m2 temperature_K Maxwell|Kappa.')
+         RETURN
+      END IF
+
+      IPG = -1
+      DO I = 1, N_GRID_BC
+         IF (TRIM(GRID_BC(I)%PHYSICAL_GROUP_NAME) == TRIM(GROUP_NAME)) IPG = I
+      END DO
+      IF (IPG == -1) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit group not found: '//TRIM(GROUP_NAME))
+         RETURN
+      END IF
+      IF (GRID_TYPE /= UNSTRUCTURED) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit currently requires an unstructured grid.')
+         RETURN
+      END IF
+
+      ISPECIES = SPECIES_NAME_TO_ID(TRIM(SPECIES_NAME))
+      IF (ISPECIES < 1 .OR. ISPECIES > N_SPECIES) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit species not found: '//TRIM(SPECIES_NAME))
+         RETURN
+      END IF
+      IF (ABS(SPECIES(ISPECIES)%CHARGE) <= 0.d0) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit requires a charged species: '//TRIM(SPECIES_NAME))
+         RETURN
+      END IF
+      IF (TRIM(VDF_NAME) /= 'Maxwell' .AND. TRIM(VDF_NAME) /= 'Kappa') THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit VDF must be Maxwell or Kappa.')
+         RETURN
+      END IF
+
+      IF (ALLOCATED(SURFACE_CURRENT_EMIT_TASKS)) THEN
+         DO I = 1, N_SURFACE_CURRENT_EMIT_TASKS
+            IF (SURFACE_CURRENT_EMIT_TASKS(I)%PHYSICAL_GROUP == IPG .AND. &
+                SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID == ISPECIES) THEN
+               CALL ERROR_ABORT('Duplicate current-density source for this physical group/species.')
+               RETURN
+            END IF
+         END DO
+      END IF
+
+      EXPECTED_FACES = COUNT_SURFACE_GROUP_FACES(IPG)
+      IF (EXPECTED_FACES == 0) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit group has no boundary faces: '//TRIM(GROUP_NAME))
+         RETURN
+      END IF
+      CALL ASSIGN_VDF(TEMP_VDF, TRIM(VDF_NAME))
+      N_EXISTING = N_SURFACE_CURRENT_EMIT_TASKS
+      ALLOCATE(NEW_TASKS(N_EXISTING + EXPECTED_FACES))
+      IF (N_EXISTING > 0) NEW_TASKS(1:N_EXISTING) = SURFACE_CURRENT_EMIT_TASKS(1:N_EXISTING)
+      N_ADDED = 0
+      SELECT CASE (DIMS)
+      CASE (1)
+         DO IC = 1, NCELLS
+            DO IFACE = 1, 2
+               IF (U1D_GRID%CELL_EDGES_PG(IFACE,IC) /= IPG) CYCLE
+               AREA = SURFACE_BOUNDARY_FACE_AREA(IC, IFACE)
+               N_ADDED = N_ADDED + 1
+               TASK_INDEX = N_EXISTING + N_ADDED
+               CALL SET_SURFACE_CURRENT_TASK(NEW_TASKS(TASK_INDEX), IPG, ISPECIES, IC, IFACE, &
+                    AREA, CURRENT_DENSITY, TEMPERATURE, VDF_NAME, TEMP_VDF)
+            END DO
+         END DO
+      CASE (2)
+         DO IC = 1, NCELLS
+            DO IFACE = 1, 3
+               IF (U2D_GRID%CELL_EDGES_PG(IFACE,IC) /= IPG) CYCLE
+               AREA = SURFACE_BOUNDARY_FACE_AREA(IC, IFACE)
+               N_ADDED = N_ADDED + 1
+               TASK_INDEX = N_EXISTING + N_ADDED
+               CALL SET_SURFACE_CURRENT_TASK(NEW_TASKS(TASK_INDEX), IPG, ISPECIES, IC, IFACE, &
+                    AREA, CURRENT_DENSITY, TEMPERATURE, VDF_NAME, TEMP_VDF)
+            END DO
+         END DO
+      CASE (3)
+         DO IC = 1, NCELLS
+            DO IFACE = 1, 4
+               IF (U3D_GRID%CELL_FACES_PG(IFACE,IC) /= IPG) CYCLE
+               AREA = SURFACE_BOUNDARY_FACE_AREA(IC, IFACE)
+               N_ADDED = N_ADDED + 1
+               TASK_INDEX = N_EXISTING + N_ADDED
+               CALL SET_SURFACE_CURRENT_TASK(NEW_TASKS(TASK_INDEX), IPG, ISPECIES, IC, IFACE, &
+                    AREA, CURRENT_DENSITY, TEMPERATURE, VDF_NAME, TEMP_VDF)
+            END DO
+         END DO
+      CASE DEFAULT
+         CALL ERROR_ABORT('Boundary_current_density_emit requires an unstructured 1D, 2D or 3D mesh.')
+         RETURN
+      END SELECT
+
+      IF (N_ADDED /= EXPECTED_FACES) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit face count changed while tasks were built.')
+         RETURN
+      END IF
+      CALL MOVE_ALLOC(NEW_TASKS, SURFACE_CURRENT_EMIT_TASKS)
+      N_SURFACE_CURRENT_EMIT_TASKS = N_EXISTING + N_ADDED
+   END SUBROUTINE DEF_BOUNDARY_CURRENT_DENSITY_EMIT
+
+   SUBROUTINE SET_SURFACE_CURRENT_TASK(TASK, IPG, ISPECIES, IC, IFACE, AREA, CURRENT_DENSITY, &
+         TEMPERATURE, VDF_NAME, TEMP_VDF)
+
+      IMPLICIT NONE
+
+      TYPE(SURFACE_CURRENT_EMIT_TASK), INTENT(INOUT) :: TASK
+      INTEGER, INTENT(IN) :: IPG, ISPECIES, IC, IFACE
+      REAL(KIND=8), INTENT(IN) :: AREA, CURRENT_DENSITY, TEMPERATURE
+      CHARACTER(LEN=*), INTENT(IN) :: VDF_NAME
+      CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE, INTENT(INOUT) :: TEMP_VDF
+
+      IF (.NOT. IEEE_IS_FINITE(AREA) .OR. AREA <= 0.d0) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit encountered a non-positive or non-finite face area.')
+         RETURN
+      END IF
+      IF (.NOT. ALLOCATED(TEMP_VDF)) CALL ASSIGN_VDF(TEMP_VDF, VDF_NAME)
+
+      TASK%PHYSICAL_GROUP = IPG
+      TASK%SPECIES_ID = ISPECIES
+      TASK%IC = IC
+      TASK%IFACE = IFACE
+      TASK%FACE_AREA = AREA
+      TASK%CURRENT_DENSITY = CURRENT_DENSITY
+      TASK%TEMPERATURE = TEMPERATURE
+      TASK%FRACTIONAL_RESIDUAL = 0.d0
+      TASK%VDF_NAME = VDF_NAME
+      ALLOCATE(TASK%VDF, SOURCE=TEMP_VDF)
+   END SUBROUTINE SET_SURFACE_CURRENT_TASK
+
+   SUBROUTINE DEF_SECONDARY_ELECTRON_EMISSION(DEFINITION)
+
+      IMPLICIT NONE
+
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=256) :: GROUP_NAME
+      CHARACTER(LEN=64) :: INCIDENT_NAME, ELECTRON_NAME
+      CHARACTER(LEN=512) :: TABLE_FILE
+      REAL(KIND=8) :: TEMPERATURE
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: TABLE_ENERGY, TABLE_YIELD
+      TYPE(SECONDARY_EMISSION_MODEL), DIMENSION(:), ALLOCATABLE :: TEMP_MODELS
+      INTEGER :: IERR, IPG, INCIDENT_ID, ELECTRON_ID, I, N
+
+      CALL PARSE_SECONDARY_EMISSION_DEFINITION(DEFINITION, GROUP_NAME, INCIDENT_NAME, &
+           ELECTRON_NAME, TABLE_FILE, TEMPERATURE, IERR)
+      IF (IERR /= SEEM_OK) THEN
+         CALL ERROR_ABORT('Invalid Secondary_electron_emission definition; expected: '// &
+                          'physical_group incident_species electron_species yield_table_file temperature_K.')
+         RETURN
+      END IF
+
+      IPG = -1
+      DO I = 1, N_GRID_BC
+         IF (TRIM(GRID_BC(I)%PHYSICAL_GROUP_NAME) == TRIM(GROUP_NAME)) IPG = I
+      END DO
+      IF (IPG == -1) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission group not found: '//TRIM(GROUP_NAME))
+         RETURN
+      END IF
+      IF (GRID_TYPE /= UNSTRUCTURED) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission currently requires an unstructured grid.')
+         RETURN
+      END IF
+      IF (COUNT_SURFACE_GROUP_FACES(IPG) == 0) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission group has no boundary faces: '//TRIM(GROUP_NAME))
+         RETURN
+      END IF
+
+      INCIDENT_ID = SPECIES_NAME_TO_ID(TRIM(INCIDENT_NAME))
+      ELECTRON_ID = SPECIES_NAME_TO_ID(TRIM(ELECTRON_NAME))
+      IF (INCIDENT_ID < 1 .OR. INCIDENT_ID > N_SPECIES) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission incident species not found: '//TRIM(INCIDENT_NAME))
+         RETURN
+      END IF
+      IF (ELECTRON_ID < 1 .OR. ELECTRON_ID > N_SPECIES) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission product species not found: '//TRIM(ELECTRON_NAME))
+         RETURN
+      END IF
+      IF (SPECIES(ELECTRON_ID)%CHARGE >= 0.d0) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission product species must have negative charge.')
+         RETURN
+      END IF
+      IF (ALLOCATED(SECONDARY_EMISSION_MODELS)) THEN
+         DO I = 1, N_SECONDARY_EMISSION_MODELS
+            IF (SECONDARY_EMISSION_MODELS(I)%PHYSICAL_GROUP == IPG .AND. &
+                SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID == INCIDENT_ID) THEN
+               CALL ERROR_ABORT('Duplicate Secondary_electron_emission group/incident-species model.')
+               RETURN
+            END IF
+         END DO
+      END IF
+
+      CALL READ_SEE_YIELD_TABLE(TRIM(TABLE_FILE), TABLE_ENERGY, TABLE_YIELD, IERR)
+      IF (IERR /= SEEM_OK) THEN
+         CALL ERROR_ABORT('Could not read a valid two-column SEE yield table: '//TRIM(TABLE_FILE))
+         RETURN
+      END IF
+
+      N = N_SECONDARY_EMISSION_MODELS
+      ALLOCATE(TEMP_MODELS(N+1))
+      IF (N > 0) TEMP_MODELS(1:N) = SECONDARY_EMISSION_MODELS(1:N)
+      CALL MOVE_ALLOC(TEMP_MODELS, SECONDARY_EMISSION_MODELS)
+      N_SECONDARY_EMISSION_MODELS = N + 1
+      SECONDARY_EMISSION_MODELS(N+1)%PHYSICAL_GROUP = IPG
+      SECONDARY_EMISSION_MODELS(N+1)%INCIDENT_SPECIES_ID = INCIDENT_ID
+      SECONDARY_EMISSION_MODELS(N+1)%ELECTRON_SPECIES_ID = ELECTRON_ID
+      SECONDARY_EMISSION_MODELS(N+1)%TABLE_FILE = TRIM(TABLE_FILE)
+      SECONDARY_EMISSION_MODELS(N+1)%SECONDARY_TEMPERATURE = TEMPERATURE
+      CALL MOVE_ALLOC(TABLE_ENERGY, SECONDARY_EMISSION_MODELS(N+1)%INCIDENT_ENERGY_EV)
+      CALL MOVE_ALLOC(TABLE_YIELD, SECONDARY_EMISSION_MODELS(N+1)%YIELD_TABLE)
+      SECONDARY_EMISSION_MODELS(N+1)%SURFACE_AREA = SURFACE_BOUNDARY_GROUP_AREA(IPG)
+      IF (.NOT. IEEE_IS_FINITE(SECONDARY_EMISSION_MODELS(N+1)%SURFACE_AREA) .OR. &
+          SECONDARY_EMISSION_MODELS(N+1)%SURFACE_AREA <= 0.d0) &
+         CALL ERROR_ABORT('Secondary_electron_emission group has zero or invalid total face area.')
+   END SUBROUTINE DEF_SECONDARY_ELECTRON_EMISSION
+
+   INTEGER FUNCTION COUNT_SURFACE_GROUP_FACES(IPG) RESULT(NFACES)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: IPG
+      NFACES = 0
+      SELECT CASE (DIMS)
+      CASE (1)
+         IF (ALLOCATED(U1D_GRID%CELL_EDGES_PG)) NFACES = COUNT(U1D_GRID%CELL_EDGES_PG == IPG)
+      CASE (2)
+         IF (ALLOCATED(U2D_GRID%CELL_EDGES_PG)) NFACES = COUNT(U2D_GRID%CELL_EDGES_PG == IPG)
+      CASE (3)
+         IF (ALLOCATED(U3D_GRID%CELL_FACES_PG)) NFACES = COUNT(U3D_GRID%CELL_FACES_PG == IPG)
+      END SELECT
+   END FUNCTION COUNT_SURFACE_GROUP_FACES
+
+   REAL(KIND=8) FUNCTION SURFACE_BOUNDARY_GROUP_AREA(IPG) RESULT(GROUP_AREA)
+
+      IMPLICIT NONE
+      INTEGER, INTENT(IN) :: IPG
+      INTEGER :: IC, IFACE, N_FACES
+      REAL(KIND=8) :: FACE_AREA
+
+      GROUP_AREA = 0.d0
+      SELECT CASE (DIMS)
+      CASE (1)
+         N_FACES = 2
+      CASE (2)
+         N_FACES = 3
+      CASE (3)
+         N_FACES = 4
+      CASE DEFAULT
+         RETURN
+      END SELECT
+
+      DO IC = 1, NCELLS
+         DO IFACE = 1, N_FACES
+            IF (DIMS == 1) THEN
+               IF (U1D_GRID%CELL_EDGES_PG(IFACE,IC) /= IPG) CYCLE
+            ELSE IF (DIMS == 2) THEN
+               IF (U2D_GRID%CELL_EDGES_PG(IFACE,IC) /= IPG) CYCLE
+            ELSE
+               IF (U3D_GRID%CELL_FACES_PG(IFACE,IC) /= IPG) CYCLE
+            END IF
+            FACE_AREA = SURFACE_BOUNDARY_FACE_AREA(IC, IFACE)
+            IF (.NOT. IEEE_IS_FINITE(FACE_AREA) .OR. FACE_AREA <= 0.d0) THEN
+               GROUP_AREA = -1.d0
+               RETURN
+            END IF
+            GROUP_AREA = GROUP_AREA + FACE_AREA
+         END DO
+      END DO
+   END FUNCTION SURFACE_BOUNDARY_GROUP_AREA
+
+   REAL(KIND=8) FUNCTION SURFACE_BOUNDARY_FACE_AREA(IC, IFACE) RESULT(AREA)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: IC, IFACE
+      INTEGER :: IV1, IV2
+      REAL(KIND=8) :: X1, Y1, X2, Y2, EDGE_LENGTH
+
+      AREA = 0.d0
+      SELECT CASE (DIMS)
+      CASE (1)
+         AREA = (YMAX - YMIN) * (ZMAX - ZMIN)
+      CASE (2)
+         SELECT CASE (IFACE)
+         CASE (1)
+            IV1 = U2D_GRID%CELL_NODES(1,IC)
+            IV2 = U2D_GRID%CELL_NODES(2,IC)
+         CASE (2)
+            IV1 = U2D_GRID%CELL_NODES(2,IC)
+            IV2 = U2D_GRID%CELL_NODES(3,IC)
+         CASE (3)
+            IV1 = U2D_GRID%CELL_NODES(3,IC)
+            IV2 = U2D_GRID%CELL_NODES(1,IC)
+         CASE DEFAULT
+            RETURN
+         END SELECT
+         X1 = U2D_GRID%NODE_COORDS(1,IV1)
+         Y1 = U2D_GRID%NODE_COORDS(2,IV1)
+         X2 = U2D_GRID%NODE_COORDS(1,IV2)
+         Y2 = U2D_GRID%NODE_COORDS(2,IV2)
+         EDGE_LENGTH = SQRT((X2-X1)**2 + (Y2-Y1)**2)
+         IF (AXI) THEN
+            AREA = (ZMAX - ZMIN) * 0.5d0 * (Y1 + Y2) * EDGE_LENGTH
+         ELSE
+            AREA = EDGE_LENGTH * (ZMAX - ZMIN)
+         END IF
+      CASE (3)
+         AREA = U3D_GRID%FACE_AREA(IFACE,IC)
+      END SELECT
+   END FUNCTION SURFACE_BOUNDARY_FACE_AREA
 
    SUBROUTINE DEF_THERMIONIC_EMIT(DEFINITION)
 
@@ -1826,7 +2406,7 @@ MODULE initialization
       CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
 
       CHARACTER*64 :: MIX_NAME
-      INTEGER      :: MIX_ID, I, IC, IPG
+      INTEGER      :: MIX_ID, I, IC, IPG, N_EMIT_TASKS_START
       TYPE(EMIT_TASK_DATA_STRUCTURE), DIMENSION(:), ALLOCATABLE :: TEMP_EMIT_TASKS
       CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE :: TEMP_VDF
 
@@ -1839,6 +2419,7 @@ MODULE initialization
          IF (GRID_BC(I)%PHYSICAL_GROUP_NAME == STRARRAY(1)) IPG = I
       END DO
       IF (IPG == -1) CALL ERROR_ABORT('Error in boundary emit definition. Group name not found.')
+      N_EMIT_TASKS_START = N_EMIT_TASKS
 
       READ(STRARRAY(2),'(A10)') MIX_NAME
       READ(STRARRAY(3), '(ES14.0)') T_SURFACE
@@ -1946,6 +2527,10 @@ MODULE initialization
          END DO
       END IF
 
+      DO I = N_EMIT_TASKS_START + 1, N_EMIT_TASKS
+         EMIT_TASKS(I)%PHYSICAL_GROUP = IPG
+      END DO
+
    END SUBROUTINE DEF_THERMIONIC_EMIT
 
 
@@ -1959,7 +2544,7 @@ MODULE initialization
       CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
 
       CHARACTER*64 :: MIX_NAME
-      INTEGER      :: MIX_ID, I, IC, IPG
+      INTEGER      :: MIX_ID, I, IC, IPG, N_EMIT_TASKS_START
       TYPE(EMIT_TASK_DATA_STRUCTURE), DIMENSION(:), ALLOCATABLE :: TEMP_EMIT_TASKS
       CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE :: TEMP_VDF
 
@@ -1972,6 +2557,7 @@ MODULE initialization
          IF (GRID_BC(I)%PHYSICAL_GROUP_NAME == STRARRAY(1)) IPG = I
       END DO
       IF (IPG == -1) CALL ERROR_ABORT('Error in boundary emit definition. Group name not found.')
+      N_EMIT_TASKS_START = N_EMIT_TASKS
 
       READ(STRARRAY(2),'(A10)') MIX_NAME
       READ(STRARRAY(3), '(ES14.0)') T_SURFACE
@@ -2078,15 +2664,20 @@ MODULE initialization
          END DO
       END IF
 
+      DO I = N_EMIT_TASKS_START + 1, N_EMIT_TASKS
+         EMIT_TASKS(I)%PHYSICAL_GROUP = IPG
+      END DO
+
    END SUBROUTINE DEF_EVAPORATION_EMIT
 
 
 
-   SUBROUTINE DEF_INITIAL_PARTICLES(DEFINITION)
+   SUBROUTINE DEF_INITIAL_PARTICLES(DEFINITION, SOURCE_ONLY)
 
       IMPLICIT NONE
 
       CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      LOGICAL, OPTIONAL, INTENT(IN) :: SOURCE_ONLY
 
       INTEGER :: N_STR
       CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
@@ -2144,6 +2735,7 @@ MODULE initialization
       INITIAL_PARTICLES_TASKS(N_INITIAL_PARTICLES_TASKS)%TROT = TROT
       INITIAL_PARTICLES_TASKS(N_INITIAL_PARTICLES_TASKS)%TVIB = TVIB
       INITIAL_PARTICLES_TASKS(N_INITIAL_PARTICLES_TASKS)%MIX_ID = MIX_ID
+      IF (PRESENT(SOURCE_ONLY)) INITIAL_PARTICLES_TASKS(N_INITIAL_PARTICLES_TASKS)%SOURCE_ONLY = SOURCE_ONLY
       ALLOCATE(INITIAL_PARTICLES_TASKS(N_INITIAL_PARTICLES_TASKS)%VDF, SOURCE=TEMP_VDF)
       IF (N_STR .EQ. 12) THEN
          SELECT TYPE(vdf_ptr => INITIAL_PARTICLES_TASKS(N_INITIAL_PARTICLES_TASKS)%VDF)
@@ -2215,6 +2807,133 @@ MODULE initialization
       ALLOCATE(VOLUME_INJECT_TASKS(N_VOLUME_INJECT_TASKS)%VDF, SOURCE=TEMP_VDF)
 
    END SUBROUTINE DEF_VOLUME_INJECT
+
+
+   SUBROUTINE DEF_SOURCE_REGION(DEFINITION)
+
+      IMPLICIT NONE
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      INTEGER :: N_STR
+
+      IF (BOOL_SOURCE_REGION) CALL ERROR_ABORT('Source_region may be defined only once.')
+      CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
+      IF (N_STR /= 2) CALL ERROR_ABORT('Source_region expects: x_min x_max (m).')
+      READ(STRARRAY(1),*) SOURCE_REGION_XMIN
+      READ(STRARRAY(2),*) SOURCE_REGION_XMAX
+      BOOL_SOURCE_REGION = .TRUE.
+
+   END SUBROUTINE DEF_SOURCE_REGION
+
+
+   SUBROUTINE DEF_SOURCE_THERMALIZATION(DEFINITION)
+
+      IMPLICIT NONE
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      INTEGER :: N_STR
+
+      IF (BOOL_SOURCE_THERMALIZATION) CALL ERROR_ABORT('Source_thermalization may be defined only once.')
+      CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
+      IF (N_STR /= 6) CALL ERROR_ABORT('Source_thermalization expects: species nu[1/s] T[K] ux[m/s] uy[m/s] uz[m/s].')
+      SOURCE_THERMAL_SPECIES = SPECIES_NAME_TO_ID(TRIM(STRARRAY(1)))
+      READ(STRARRAY(2),*) SOURCE_THERMAL_NU
+      READ(STRARRAY(3),*) SOURCE_THERMAL_TEMP
+      READ(STRARRAY(4),*) SOURCE_THERMAL_UX
+      READ(STRARRAY(5),*) SOURCE_THERMAL_UY
+      READ(STRARRAY(6),*) SOURCE_THERMAL_UZ
+      BOOL_SOURCE_THERMALIZATION = .TRUE.
+
+   END SUBROUTINE DEF_SOURCE_THERMALIZATION
+
+
+   SUBROUTINE DEF_SOURCE_REINJECTION(DEFINITION)
+
+      IMPLICIT NONE
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      CHARACTER(LEN=16) :: MODE, FACE
+      TYPE(SOURCE_REINJECTION_RULE) :: RULE
+      TYPE(SOURCE_REINJECTION_RULE), ALLOCATABLE :: NEW_RULES(:)
+      INTEGER :: N_STR, I
+
+      CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
+      IF (N_STR /= 7) CALL ERROR_ABORT('Source_reinjection expects: pair|single trigger product1 T1[K] product2|none T2[K] x_min|x_max.')
+
+      READ(STRARRAY(1),'(A)') MODE
+      IF (TRIM(MODE) == 'pair') THEN
+         RULE%MODE = SOURCE_REINJECT_PAIR
+      ELSE IF (TRIM(MODE) == 'single') THEN
+         RULE%MODE = SOURCE_REINJECT_SINGLE
+      ELSE
+         CALL ERROR_ABORT('Source_reinjection mode must be pair or single.')
+      END IF
+
+      RULE%TRIGGER_SPECIES = SPECIES_NAME_TO_ID(TRIM(STRARRAY(2)))
+      RULE%PRODUCT_SPECIES_1 = SPECIES_NAME_TO_ID(TRIM(STRARRAY(3)))
+      READ(STRARRAY(4),*) RULE%PRODUCT_TEMP_1
+      READ(STRARRAY(5),'(A)') MODE
+      IF (TRIM(MODE) == 'none') THEN
+         RULE%PRODUCT_SPECIES_2 = -1
+         READ(STRARRAY(6),*) RULE%PRODUCT_TEMP_2
+      ELSE
+         RULE%PRODUCT_SPECIES_2 = SPECIES_NAME_TO_ID(TRIM(STRARRAY(5)))
+         READ(STRARRAY(6),*) RULE%PRODUCT_TEMP_2
+      END IF
+      READ(STRARRAY(7),'(A)') FACE
+      IF (TRIM(FACE) == 'x_min') THEN
+         RULE%LOSS_FACE = 1
+      ELSE IF (TRIM(FACE) == 'x_max') THEN
+         RULE%LOSS_FACE = 2
+      ELSE
+         CALL ERROR_ABORT('Source_reinjection face must be x_min or x_max.')
+      END IF
+
+      DO I = 1, N_SOURCE_REINJECTION_RULES
+         IF (SOURCE_REINJECTION_RULES(I)%TRIGGER_SPECIES == RULE%TRIGGER_SPECIES .AND. &
+             SOURCE_REINJECTION_RULES(I)%LOSS_FACE == RULE%LOSS_FACE) &
+            CALL ERROR_ABORT('Duplicate Source_reinjection trigger species and loss face.')
+      END DO
+
+      ALLOCATE(NEW_RULES(N_SOURCE_REINJECTION_RULES+1))
+      IF (N_SOURCE_REINJECTION_RULES > 0) NEW_RULES(1:N_SOURCE_REINJECTION_RULES) = SOURCE_REINJECTION_RULES
+      NEW_RULES(N_SOURCE_REINJECTION_RULES+1) = RULE
+      CALL MOVE_ALLOC(NEW_RULES, SOURCE_REINJECTION_RULES)
+      N_SOURCE_REINJECTION_RULES = N_SOURCE_REINJECTION_RULES + 1
+
+      ! Preserve the legacy single-rule globals for existing callers and inputs.
+      IF (N_SOURCE_REINJECTION_RULES == 1) THEN
+         SOURCE_REINJECTION_MODE = RULE%MODE
+         SOURCE_TRIGGER_SPECIES = RULE%TRIGGER_SPECIES
+         SOURCE_PRODUCT_SPECIES_1 = RULE%PRODUCT_SPECIES_1
+         SOURCE_PRODUCT_SPECIES_2 = RULE%PRODUCT_SPECIES_2
+         SOURCE_PRODUCT_TEMP_1 = RULE%PRODUCT_TEMP_1
+         SOURCE_PRODUCT_TEMP_2 = RULE%PRODUCT_TEMP_2
+         SOURCE_LOSS_FACE = RULE%LOSS_FACE
+      END IF
+
+   END SUBROUTINE DEF_SOURCE_REINJECTION
+
+
+   SUBROUTINE DEF_SOURCE_CONSTANT_FLUX(DEFINITION)
+
+      IMPLICIT NONE
+      CHARACTER(LEN=*), INTENT(IN) :: DEFINITION
+      CHARACTER(LEN=80), ALLOCATABLE :: STRARRAY(:)
+      INTEGER :: N_STR
+
+      IF (BOOL_SOURCE_CONSTANT_FLUX) CALL ERROR_ABORT('Source_constant_flux may be defined only once.')
+      CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
+      IF (N_STR /= 6) CALL ERROR_ABORT('Source_constant_flux expects: species rate[m^-3 s^-1] T[K] ux[m/s] uy[m/s] uz[m/s].')
+      SOURCE_FLUX_SPECIES = SPECIES_NAME_TO_ID(TRIM(STRARRAY(1)))
+      READ(STRARRAY(2),*) SOURCE_FLUX_RATE
+      READ(STRARRAY(3),*) SOURCE_FLUX_TEMP
+      READ(STRARRAY(4),*) SOURCE_FLUX_UX
+      READ(STRARRAY(5),*) SOURCE_FLUX_UY
+      READ(STRARRAY(6),*) SOURCE_FLUX_UZ
+      BOOL_SOURCE_CONSTANT_FLUX = .TRUE.
+
+   END SUBROUTINE DEF_SOURCE_CONSTANT_FLUX
 
 
    SUBROUTINE DEF_SOLENOID(DEFINITION)
@@ -2858,13 +3577,19 @@ MODULE initialization
                ELSE
                   DOMAIN_VOLUME = (XMAX-XMIN)*(YMAX-YMIN)*(ZMAX-ZMIN)
                END IF
+               IF (INITIAL_PARTICLES_TASKS(ITASK)%SOURCE_ONLY) &
+                  DOMAIN_VOLUME = (SOURCE_REGION_XMAX-SOURCE_REGION_XMIN)*(YMAX-YMIN)*(ZMAX-ZMIN)
                NP_INIT = RANDINT(INITIAL_PARTICLES_TASKS(ITASK)%NRHO/(FNUM*SPECIES(S_ID)%SPWT)*DOMAIN_VOLUME* &
                            MIXTURES(INITIAL_PARTICLES_TASKS(ITASK)%MIX_ID)%COMPONENTS(i)%MOLFRAC/N_MPI_THREADS)
                IF (NP_INIT == 0) CYCLE
                DO IP = 1, NP_INIT
 
                   ! Create particle position randomly in the domain
-                  XP = XMIN + (XMAX-XMIN)*rf()
+                  IF (INITIAL_PARTICLES_TASKS(ITASK)%SOURCE_ONLY) THEN
+                     XP = SOURCE_REGION_XMIN + (SOURCE_REGION_XMAX-SOURCE_REGION_XMIN)*rf()
+                  ELSE
+                     XP = XMIN + (XMAX-XMIN)*rf()
+                  END IF
 
                   IF (AXI .AND. (.NOT. BOOL_RADIAL_WEIGHTING)) THEN
                      YP = SQRT(YMIN*YMIN + rf()*(YMAX*YMAX - YMIN*YMIN))
@@ -2890,6 +3615,8 @@ MODULE initialization
                   CALL CELL_FROM_POSITION(XP,YP,  CID) ! Find cell containing particle
 
                   CALL INIT_PARTICLE(XP,YP,ZP,VXP,VYP,VZP,EROT,EVIB,S_ID,CID,DT, particleNOW) ! Save in particle
+                  IF (INITIAL_PARTICLES_TASKS(ITASK)%SOURCE_ONLY) &
+                     CALL SET_PARTICLE_SOURCE_TAG(particleNOW, PARTICLE_SOURCE_REGION)
                   CALL ADD_PARTICLE_ARRAY(particleNOW, NP_PROC, particles) ! Add particle to local array
                END DO
             END IF
@@ -2907,6 +3634,21 @@ MODULE initialization
    SUBROUTINE INPUT_DATA_SANITY_CHECK
 
       IMPLICIT NONE
+      INTEGER :: I, J, EXTERNAL_FIELD_ERROR
+      TYPE(SOURCE_REINJECTION_RULE) :: SOURCE_RULE
+      CHARACTER(LEN=512) :: EXTERNAL_FIELD_MESSAGE
+      LOGICAL :: SOURCE_MAPPING_USED
+
+      IF (ALLOCATED(INITIAL_PARTICLES_TASKS)) THEN
+         DO I = 1, N_INITIAL_PARTICLES_TASKS
+            IF (.NOT. INITIAL_PARTICLES_TASKS(I)%SOURCE_ONLY) CYCLE
+            IF (.NOT. BOOL_SOURCE_REGION .OR. DIMS /= 1 .OR. AXI .OR. GRID_TYPE == UNSTRUCTURED) &
+               CALL ERROR_ABORT('Source_initial_particles requires a 1D structured source region.')
+            IF (SOURCE_REGION_XMIN <= XMIN .OR. SOURCE_REGION_XMAX >= XMAX .OR. &
+                SOURCE_REGION_XMIN >= SOURCE_REGION_XMAX) &
+               CALL ERROR_ABORT('Source_initial_particles requires an ordered source interval inside the domain.')
+         END DO
+      END IF
 
       ! ------------ Check for various values for 0D simulation ------------
       IF (DIMS == 0 .AND. ((NX /= 1) .OR. (NY /= 1) .OR. (NZ /= 1))) THEN
@@ -2926,11 +3668,11 @@ MODULE initialization
          CALL ERROR_ABORT('ERROR! Number of cells along X or Y smaller than one. ABORTING!')
       END IF 
 
-      IF (NZ /= 1) THEN
+      IF (GRID_TYPE /= UNSTRUCTURED .AND. NZ /= 1) THEN
          CALL ERROR_ABORT('ERROR! Number of cells along Z different than 1 is not supported. ABORTING!')
       END IF 
      
-      IF (DIMS == 1 .AND. NY /= 1) THEN
+      IF (GRID_TYPE /= UNSTRUCTURED .AND. DIMS == 1 .AND. NY /= 1) THEN
          CALL ERROR_ABORT('ERROR! Number of cells along Y different than 1 for a 2d simulation. ABORTING!')
       END IF
       ! ------------ Check geometrical symmetries and flags ------
@@ -2955,6 +3697,218 @@ MODULE initialization
             CALL ERROR_ABORT('Hybrid PIC Type was chosen but no electron fluids are defined.')
          END IF
       END IF
+
+      IF (PIC_TYPE == FULLYIMPLICIT) THEN
+         IF (GRID_TYPE /= UNSTRUCTURED) THEN
+            CALL ERROR_ABORT('Fully implicit PIC currently requires an unstructured grid for ADVECT_CN_B.')
+         END IF
+         IF (DIMS < 1 .OR. DIMS > 3) THEN
+            CALL ERROR_ABORT('Fully implicit PIC requires Dimensions 1, 2 or 3.')
+         END IF
+         IF (JACOBIAN_TYPE /= 3) THEN
+            CALL ERROR_ABORT('Fully implicit PIC currently requires Jacobian_type 3 for ADVECT_CN_B.')
+         END IF
+      END IF
+
+      IF (PIC_TYPE == SEMIIMPLICIT) THEN
+         CALL ONLYMASTERPRINT1(PROC_ID, &
+            'Semiimplicit PIC uses the existing scalar electrostatic Ampere correction; it is not a full Maxwell solver.')
+      END IF
+
+      IF (LEN_TRIM(EXTERNAL_B_FIELD_FILE) > 0) THEN
+         CALL LOAD_EXTERNAL_B_FIELD_FILE(TRIM(EXTERNAL_B_FIELD_FILE), EXTERNAL_FIELD_ERROR, EXTERNAL_FIELD_MESSAGE)
+         IF (EXTERNAL_FIELD_ERROR /= EXTERNAL_FIELD_OK) THEN
+            CALL ERROR_ABORT(TRIM(EXTERNAL_FIELD_MESSAGE))
+         END IF
+      END IF
+
+      IF (N_PARTICLE_SOURCE_MAPPINGS > 0) THEN
+         DO I = 1, N_PARTICLE_SOURCE_MAPPINGS
+            SOURCE_MAPPING_USED = .FALSE.
+            IF (ALLOCATED(EMIT_TASKS)) THEN
+               DO J = 1, N_EMIT_TASKS
+                  IF (EMIT_TASKS(J)%PHYSICAL_GROUP == PARTICLE_SOURCE_MAPPINGS(I)%PHYSICAL_GROUP) &
+                     SOURCE_MAPPING_USED = .TRUE.
+               END DO
+            END IF
+            IF (ALLOCATED(SURFACE_CURRENT_EMIT_TASKS)) THEN
+               DO J = 1, N_SURFACE_CURRENT_EMIT_TASKS
+                  IF (SURFACE_CURRENT_EMIT_TASKS(J)%PHYSICAL_GROUP == PARTICLE_SOURCE_MAPPINGS(I)%PHYSICAL_GROUP) &
+                     SOURCE_MAPPING_USED = .TRUE.
+               END DO
+            END IF
+            IF (.NOT. SOURCE_MAPPING_USED) THEN
+               CALL ERROR_ABORT('Particle_source_tag group has no configured particle-emission task.')
+            END IF
+         END DO
+      END IF
+
+      IF (EXTRACTION_GROUP > 0) THEN
+         EXTRACTION_AREA = SURFACE_BOUNDARY_GROUP_AREA(EXTRACTION_GROUP)
+         IF (.NOT. IEEE_IS_FINITE(EXTRACTION_AREA) .OR. EXTRACTION_AREA <= 0.d0) THEN
+            CALL ERROR_ABORT('Extraction_group must contain a positive-area physical boundary.')
+         END IF
+      END IF
+
+      IF (BOOL_SOURCE_THERMALIZATION .OR. SOURCE_REINJECTION_MODE /= SOURCE_REINJECT_NONE .OR. &
+          BOOL_SOURCE_CONSTANT_FLUX) THEN
+         IF (.NOT. BOOL_SOURCE_REGION) CALL ERROR_ABORT('Source physics requires Source_region to be defined.')
+         IF (DIMS /= 1 .OR. AXI .OR. GRID_TYPE == UNSTRUCTURED) &
+            CALL ERROR_ABORT('Source-region physics currently supports only non-axisymmetric 1D structured grids.')
+         IF (SOURCE_REGION_XMIN <= XMIN .OR. SOURCE_REGION_XMAX >= XMAX .OR. &
+             SOURCE_REGION_XMIN >= SOURCE_REGION_XMAX) &
+            CALL ERROR_ABORT('Source_region must be an ordered interval strictly inside the x domain.')
+      END IF
+
+      IF (BOOL_SOURCE_THERMALIZATION) THEN
+         IF (SOURCE_THERMAL_SPECIES < 1 .OR. SOURCE_THERMAL_SPECIES > N_SPECIES) &
+            CALL ERROR_ABORT('Source_thermalization references an unknown species.')
+         IF (SOURCE_THERMAL_NU <= 0.d0 .OR. SOURCE_THERMAL_TEMP <= 0.d0) &
+            CALL ERROR_ABORT('Source_thermalization frequency and temperature must be positive.')
+      END IF
+
+      IF (N_SOURCE_REINJECTION_RULES > 0 .OR. SOURCE_REINJECTION_MODE /= SOURCE_REINJECT_NONE) THEN
+         DO I = 1, MAX(1, N_SOURCE_REINJECTION_RULES)
+            IF (N_SOURCE_REINJECTION_RULES > 0) THEN
+               SOURCE_RULE = SOURCE_REINJECTION_RULES(I)
+            ELSE
+               SOURCE_RULE%MODE = SOURCE_REINJECTION_MODE
+               SOURCE_RULE%TRIGGER_SPECIES = SOURCE_TRIGGER_SPECIES
+               SOURCE_RULE%PRODUCT_SPECIES_1 = SOURCE_PRODUCT_SPECIES_1
+               SOURCE_RULE%PRODUCT_SPECIES_2 = SOURCE_PRODUCT_SPECIES_2
+               SOURCE_RULE%PRODUCT_TEMP_1 = SOURCE_PRODUCT_TEMP_1
+               SOURCE_RULE%PRODUCT_TEMP_2 = SOURCE_PRODUCT_TEMP_2
+               SOURCE_RULE%LOSS_FACE = SOURCE_LOSS_FACE
+            END IF
+            IF (SOURCE_RULE%TRIGGER_SPECIES < 1 .OR. SOURCE_RULE%TRIGGER_SPECIES > N_SPECIES .OR. &
+                SOURCE_RULE%PRODUCT_SPECIES_1 < 1 .OR. SOURCE_RULE%PRODUCT_SPECIES_1 > N_SPECIES) &
+               CALL ERROR_ABORT('Source_reinjection references an unknown species.')
+            IF (SOURCE_RULE%PRODUCT_TEMP_1 <= 0.d0 .OR. SPECIES(SOURCE_RULE%PRODUCT_SPECIES_1)%SPWT <= 0.d0) &
+               CALL ERROR_ABORT('Source_reinjection product1 requires positive temperature and SPWT.')
+            IF (SOURCE_RULE%LOSS_FACE < 1 .OR. SOURCE_RULE%LOSS_FACE > 2) &
+               CALL ERROR_ABORT('Source_reinjection requires a valid x_min or x_max sink.')
+            IF (SOURCE_RULE%MODE == SOURCE_REINJECT_PAIR) THEN
+               IF (SOURCE_RULE%PRODUCT_SPECIES_2 < 1 .OR. SOURCE_RULE%PRODUCT_SPECIES_2 > N_SPECIES) &
+                  CALL ERROR_ABORT('Pair reinjection requires two product species.')
+               IF (SOURCE_RULE%PRODUCT_TEMP_2 <= 0.d0 .OR. SPECIES(SOURCE_RULE%PRODUCT_SPECIES_2)%SPWT <= 0.d0) &
+                  CALL ERROR_ABORT('Pair reinjection product2 requires positive temperature and SPWT.')
+               IF (ABS(SPECIES(SOURCE_RULE%PRODUCT_SPECIES_1)%CHARGE*SPECIES(SOURCE_RULE%PRODUCT_SPECIES_1)%SPWT + &
+                       SPECIES(SOURCE_RULE%PRODUCT_SPECIES_2)%CHARGE*SPECIES(SOURCE_RULE%PRODUCT_SPECIES_2)%SPWT) > &
+                   1.d-10*MAX(1.d-30, &
+                       ABS(SPECIES(SOURCE_RULE%PRODUCT_SPECIES_1)%CHARGE*SPECIES(SOURCE_RULE%PRODUCT_SPECIES_1)%SPWT), &
+                       ABS(SPECIES(SOURCE_RULE%PRODUCT_SPECIES_2)%CHARGE*SPECIES(SOURCE_RULE%PRODUCT_SPECIES_2)%SPWT))) &
+                  CALL ERROR_ABORT('Pair reinjection products must have charge-neutral effective macro-particle weights.')
+            ELSE IF (SOURCE_RULE%MODE == SOURCE_REINJECT_SINGLE) THEN
+               IF (SOURCE_RULE%PRODUCT_SPECIES_2 /= -1) &
+                  CALL ERROR_ABORT('Single reinjection requires "none" as product2.')
+            ELSE
+               CALL ERROR_ABORT('Source_reinjection has an invalid mode.')
+            END IF
+            IF (BOOL_PERIODIC(SOURCE_RULE%LOSS_FACE) .OR. BOOL_SPECULAR(SOURCE_RULE%LOSS_FACE) .OR. &
+                BOOL_DIFFUSE(SOURCE_RULE%LOSS_FACE) .OR. BOOL_REACT(SOURCE_RULE%LOSS_FACE)) &
+               CALL ERROR_ABORT('Source_reinjection sink must be an absorbing, non-reactive x boundary.')
+         END DO
+      END IF
+
+      IF (BOOL_SOURCE_CONSTANT_FLUX) THEN
+         IF (SOURCE_FLUX_SPECIES < 1 .OR. SOURCE_FLUX_SPECIES > N_SPECIES) &
+            CALL ERROR_ABORT('Source_constant_flux references an unknown species.')
+         IF (SOURCE_FLUX_RATE < 0.d0 .OR. SOURCE_FLUX_TEMP <= 0.d0) &
+            CALL ERROR_ABORT('Source_constant_flux rate must be nonnegative and temperature positive.')
+         IF (FNUM <= 0.d0 .OR. SPECIES(SOURCE_FLUX_SPECIES)%SPWT <= 0.d0) &
+            CALL ERROR_ABORT('Source_constant_flux requires positive Fnum and species particle weight.')
+         IF (YMAX <= YMIN .OR. ZMAX <= ZMIN) &
+            CALL ERROR_ABORT('Source_constant_flux requires a positive 1D transverse cross-sectional area.')
+      END IF
+
+      IF (N_SURFACE_CURRENT_EMIT_TASKS > 0) THEN
+         IF (.NOT. ALLOCATED(SURFACE_CURRENT_EMIT_TASKS)) THEN
+            CALL ERROR_ABORT('Fixed surface current tasks were counted but not allocated.')
+            RETURN
+         END IF
+         IF (.NOT. IEEE_IS_FINITE(FNUM) .OR. FNUM <= 0.d0) &
+            CALL ERROR_ABORT('Boundary_current_density_emit requires positive finite Fnum.')
+         IF (BOOL_RADIAL_WEIGHTING) THEN
+            IF (.NOT. ALLOCATED(CELL_FNUM)) THEN
+               CALL ERROR_ABORT('Boundary_current_density_emit requires initialized cell-local radial weights.')
+               RETURN
+            END IF
+         END IF
+         DO I = 1, N_SURFACE_CURRENT_EMIT_TASKS
+            IF (SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID < 1 .OR. &
+                SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID > N_SPECIES) THEN
+               CALL ERROR_ABORT('Boundary_current_density_emit references an invalid species ID.')
+               CYCLE
+            END IF
+            IF (.NOT. IEEE_IS_FINITE(SPECIES(SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID)%CHARGE) .OR. &
+                ABS(SPECIES(SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID)%CHARGE) <= 0.d0) &
+               CALL ERROR_ABORT('Boundary_current_density_emit requires non-zero finite species charge.')
+            IF (.NOT. IEEE_IS_FINITE(SPECIES(SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID)%SPWT) .OR. &
+                SPECIES(SURFACE_CURRENT_EMIT_TASKS(I)%SPECIES_ID)%SPWT <= 0.d0) &
+               CALL ERROR_ABORT('Boundary_current_density_emit requires positive finite species SPWT.')
+            IF (BOOL_RADIAL_WEIGHTING) THEN
+               IF (SURFACE_CURRENT_EMIT_TASKS(I)%IC < 1 .OR. &
+                   SURFACE_CURRENT_EMIT_TASKS(I)%IC > SIZE(CELL_FNUM)) &
+                  CALL ERROR_ABORT('Boundary_current_density_emit face cell has no radial macro weight.')
+            END IF
+            IF (.NOT. ALLOCATED(SURFACE_CURRENT_EMIT_TASKS(I)%VDF)) &
+               CALL ERROR_ABORT('Boundary_current_density_emit VDF was not initialized.')
+         END DO
+      END IF
+
+      IF (N_SECONDARY_EMISSION_MODELS > 0) THEN
+         IF (.NOT. ALLOCATED(SECONDARY_EMISSION_MODELS)) THEN
+            CALL ERROR_ABORT('SEE models were counted but not allocated.')
+            RETURN
+         END IF
+         DO I = 1, N_SECONDARY_EMISSION_MODELS
+            IF (SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID < 1 .OR. &
+                SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID > N_SPECIES .OR. &
+                SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID < 1 .OR. &
+                SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID > N_SPECIES) THEN
+               CALL ERROR_ABORT('Secondary_electron_emission references an invalid species ID.')
+               CYCLE
+            END IF
+            IF (SPECIES(SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID)%CHARGE >= 0.d0) &
+               CALL ERROR_ABORT('Secondary_electron_emission product species must be negatively charged.')
+            IF (.NOT. IEEE_IS_FINITE(SPECIES(SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID)%MOLECULAR_MASS) .OR. &
+                SPECIES(SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID)%MOLECULAR_MASS <= 0.d0 .OR. &
+                .NOT. IEEE_IS_FINITE(SPECIES(SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID)%MOLECULAR_MASS) .OR. &
+                SPECIES(SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID)%MOLECULAR_MASS <= 0.d0) &
+               CALL ERROR_ABORT('Secondary_electron_emission species must have positive finite masses.')
+            IF (PIC_TYPE == FULLYIMPLICIT) &
+               CALL ERROR_ABORT('Secondary_electron_emission is not implemented by the fully implicit ADVECT_CN_B path.')
+            IF (.NOT. IEEE_IS_FINITE(FNUM) .OR. FNUM <= 0.d0) &
+               CALL ERROR_ABORT('Secondary_electron_emission requires positive finite Fnum.')
+            IF (.NOT. IEEE_IS_FINITE(SPECIES(SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID)%SPWT) .OR. &
+                SPECIES(SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID)%SPWT <= 0.d0 .OR. &
+                .NOT. IEEE_IS_FINITE(SPECIES(SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID)%SPWT) .OR. &
+                SPECIES(SECONDARY_EMISSION_MODELS(I)%ELECTRON_SPECIES_ID)%SPWT <= 0.d0) &
+               CALL ERROR_ABORT('Secondary_electron_emission requires positive finite species SPWT values.')
+            IF (.NOT. IEEE_IS_FINITE(SECONDARY_EMISSION_MODELS(I)%SURFACE_AREA) .OR. &
+                SECONDARY_EMISSION_MODELS(I)%SURFACE_AREA <= 0.d0) &
+               CALL ERROR_ABORT('Secondary_electron_emission requires positive finite surface area.')
+            IF (BOOL_RADIAL_WEIGHTING) THEN
+               IF (.NOT. ALLOCATED(CELL_FNUM)) THEN
+                  CALL ERROR_ABORT('Secondary_electron_emission requires initialized cell-local radial weights.')
+               END IF
+            END IF
+            IF (GRID_BC(SECONDARY_EMISSION_MODELS(I)%PHYSICAL_GROUP)%PARTICLE_BC( &
+                SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID) /= VACUUM .OR. &
+                GRID_BC(SECONDARY_EMISSION_MODELS(I)%PHYSICAL_GROUP)%REACT) &
+               CALL ERROR_ABORT('Secondary_electron_emission requires a non-reactive absorbing particle boundary.')
+            IF (.NOT. ALLOCATED(SECONDARY_EMISSION_MODELS(I)%INCIDENT_ENERGY_EV) .OR. &
+                .NOT. ALLOCATED(SECONDARY_EMISSION_MODELS(I)%YIELD_TABLE)) THEN
+               CALL ERROR_ABORT('Secondary_electron_emission yield table data was not initialized.')
+            ELSE IF (SIZE(SECONDARY_EMISSION_MODELS(I)%INCIDENT_ENERGY_EV) < 2 .OR. &
+                     SIZE(SECONDARY_EMISSION_MODELS(I)%INCIDENT_ENERGY_EV) /= &
+                     SIZE(SECONDARY_EMISSION_MODELS(I)%YIELD_TABLE)) THEN
+               CALL ERROR_ABORT('Secondary_electron_emission yield table has an invalid size.')
+            END IF
+         END DO
+      END IF
+
+      CALL VALIDATE_PERIODIC_BOUNDARY_GROUPS
 
    END SUBROUTINE INPUT_DATA_SANITY_CHECK
 

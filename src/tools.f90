@@ -329,10 +329,12 @@ CONTAINS
       IMPLICIT NONE
 
       INTEGER, INTENT(IN) :: TIMESTEP
-      CHARACTER(LEN=512)  :: filename
+      CHARACTER(LEN=512)  :: filename, source_filename
       INTEGER :: IP
 
       WRITE(filename, "(A,A,I0.5,A6,I0.8)") TRIM(ADJUSTL(PARTDUMP_SAVE_PATH)), "proc_", PROC_ID, "_time_", TIMESTEP ! Compose filename
+      WRITE(source_filename, "(A,A)") TRIM(filename), '.source'
+      OPEN(11, FILE=source_filename, STATUS='NEW')
 
       ! Open file for writing
       IF (BOOL_BINARY_OUTPUT) THEN
@@ -344,6 +346,7 @@ CONTAINS
             WRITE(10) particles(IP)%X, particles(IP)%Y, particles(IP)%Z, &
             particles(IP)%VX, particles(IP)%VY, particles(IP)%VZ, particles(IP)%EROT, particles(IP)%EVIB, &
             particles(IP)%S_ID, particles(IP)%IC, particles(IP)%DTRIM
+            WRITE(11,*) particles(IP)%SOURCE_TAG
          END DO
          CLOSE(10)
       ELSE
@@ -356,9 +359,11 @@ CONTAINS
             WRITE(10,*) particles(IP)%X, particles(IP)%Y, particles(IP)%Z, &
             particles(IP)%VX, particles(IP)%VY, particles(IP)%VZ, particles(IP)%EROT, particles(IP)%EVIB, &
             particles(IP)%S_ID, particles(IP)%IC, particles(IP)%DTRIM
+            WRITE(11,*) particles(IP)%SOURCE_TAG
          END DO
          CLOSE(10)
       END IF
+      CLOSE(11)
 
 
 
@@ -411,9 +416,10 @@ CONTAINS
       IMPLICIT NONE
 
       INTEGER, INTENT(IN) :: TIMESTEP
-      CHARACTER(LEN=512)  :: filename
+      CHARACTER(LEN=512)  :: filename, source_filename
       CHARACTER(LEN=256)  :: restart_path
-      INTEGER :: ios
+      INTEGER :: ios, source_ios, source_tag
+      LOGICAL :: source_available
 
       REAL(KIND=8) :: XP, YP, ZP, VX, VY, VZ, EROT, EVIB, DTRIM
       INTEGER      :: S_ID, IC
@@ -423,6 +429,17 @@ CONTAINS
       IF (LEN_TRIM(PARTRESTART_LOAD_PATH) > 0) restart_path = PARTRESTART_LOAD_PATH
       WRITE(filename, "(A,A,I0.5,A6,I0.8)") TRIM(ADJUSTL(restart_path)), &
          "proc_", PROC_ID, "_time_", TIMESTEP ! Compose filename
+      WRITE(source_filename, "(A,A)") TRIM(filename), '.source'
+      INQUIRE(FILE=source_filename, EXIST=source_available)
+      IF (source_available) THEN
+         OPEN(1011, FILE=source_filename, STATUS='OLD', IOSTAT=source_ios)
+         IF (source_ios /= 0) THEN
+            CALL ERROR_ABORT('Particle source sidecar exists but could not be opened.')
+            RETURN
+         END IF
+      ELSE
+         CALL ONLYMASTERPRINT1(PROC_ID, 'Particle source sidecar not found; restarted particles use UNKNOWN source tags.')
+      END IF
 
       ! Open file for reading
       IF (BOOL_BINARY_OUTPUT) THEN
@@ -438,10 +455,18 @@ CONTAINS
             READ(1010, IOSTAT=ios) XP, YP, ZP, VX, VY, VZ, EROT, EVIB, S_ID, IC, DTRIM
 
             IF (ios < 0) EXIT
+            source_tag = PARTICLE_SOURCE_UNKNOWN
+            IF (source_available) THEN
+               READ(1011,*,IOSTAT=source_ios) source_tag
+               IF (source_ios /= 0) CALL ERROR_ABORT('Particle source sidecar length does not match the particle file.')
+               IF (source_tag < PARTICLE_SOURCE_UNKNOWN .OR. source_tag > PARTICLE_SOURCE_OTHER) &
+                  CALL ERROR_ABORT('Particle source sidecar contains an invalid source tag.')
+            END IF
             IF (PARTLOAD_FRACSAMPLE < 1) THEN
                IF (rf() > PARTLOAD_FRACSAMPLE) CYCLE
             END IF
             CALL INIT_PARTICLE(XP,YP,ZP,VX,VY,VZ,EROT,EVIB,S_ID,IC,DT, particleNOW) ! Save in particle
+            CALL SET_PARTICLE_SOURCE_TAG(particleNOW, source_tag)
             CALL ADD_PARTICLE_ARRAY(particleNOW, NP_PROC, particles) ! Add particle to local array
          END DO
 
@@ -456,14 +481,29 @@ CONTAINS
          DO
             READ(1010,*,IOSTAT=ios) XP, YP, ZP, VX, VY, VZ, EROT, EVIB, S_ID, IC, DTRIM
             IF (ios < 0) EXIT
+            source_tag = PARTICLE_SOURCE_UNKNOWN
+            IF (source_available) THEN
+               READ(1011,*,IOSTAT=source_ios) source_tag
+               IF (source_ios /= 0) CALL ERROR_ABORT('Particle source sidecar length does not match the particle file.')
+               IF (source_tag < PARTICLE_SOURCE_UNKNOWN .OR. source_tag > PARTICLE_SOURCE_OTHER) &
+                  CALL ERROR_ABORT('Particle source sidecar contains an invalid source tag.')
+            END IF
             IF (PARTLOAD_FRACSAMPLE < 1) THEN
                IF (rf() > PARTLOAD_FRACSAMPLE) CYCLE
             END IF
             CALL INIT_PARTICLE(XP,YP,ZP,VX,VY,VZ,EROT,EVIB,S_ID,IC,DT, particleNOW) ! Save in particle
+            CALL SET_PARTICLE_SOURCE_TAG(particleNOW, source_tag)
             CALL ADD_PARTICLE_ARRAY(particleNOW, NP_PROC, particles) ! Add particle to local array
          END DO
 
          CLOSE(1010)
+      END IF
+
+      IF (source_available) THEN
+         READ(1011,*,IOSTAT=source_ios) source_tag
+         IF (source_ios == 0) CALL ERROR_ABORT('Particle source sidecar has extra records.')
+         IF (source_ios > 0) CALL ERROR_ABORT('Particle source sidecar contains an invalid trailing record.')
+         CLOSE(1011)
       END IF
 
 
@@ -1162,6 +1202,34 @@ CONTAINS
       END DO
 
    END SUBROUTINE THERMAL_BATH
+
+
+   SUBROUTINE THERMALIZE_SOURCE_REGION
+
+      IMPLICIT NONE
+      INTEGER :: JP, S_ID
+      REAL(KIND=8) :: PROBABILITY, VX, VY, VZ, MASS
+
+      IF (.NOT. BOOL_SOURCE_THERMALIZATION) RETURN
+      PROBABILITY = 1.d0 - EXP(-SOURCE_THERMAL_NU*DT)
+
+      DO JP = 1, NP_PROC
+         S_ID = particles(JP)%S_ID
+         IF (S_ID /= SOURCE_THERMAL_SPECIES) CYCLE
+         IF (particles(JP)%X < SOURCE_REGION_XMIN .OR. particles(JP)%X > SOURCE_REGION_XMAX) CYCLE
+         IF (rf() > PROBABILITY) CYCLE
+
+         MASS = SPECIES(S_ID)%MOLECULAR_MASS
+         CALL MAXWELL(SOURCE_THERMAL_UX, SOURCE_THERMAL_UY, SOURCE_THERMAL_UZ, &
+                      SOURCE_THERMAL_TEMP, SOURCE_THERMAL_TEMP, SOURCE_THERMAL_TEMP, &
+                      VX, VY, VZ, MASS)
+         particles(JP)%VX = VX
+         particles(JP)%VY = VY
+         particles(JP)%VZ = VZ
+         SOURCE_THERMALIZED_COUNT = SOURCE_THERMALIZED_COUNT + 1
+      END DO
+
+   END SUBROUTINE THERMALIZE_SOURCE_REGION
 
 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

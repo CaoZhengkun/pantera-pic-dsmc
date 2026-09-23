@@ -26,10 +26,14 @@ MODULE fields
    USE screen
    USE tools
    USE grid_and_partition
+   USE field_dof_utils, ONLY: REDUCE_FIELD_ARRAY, EXPAND_FIELD_ARRAY
+   USE external_field, ONLY: GET_EXTERNAL_B_FIELD, EXTERNAL_FIELD_LOADED
 
    USE petsc
 
    IMPLICIT NONE
+
+   PUBLIC :: INTERPOLATE_LINEAR_SIMPLEX_B
 
    Mat Amat, Jmat, Jmfmat, Qmat, Rmat, Qmatfact, Pmat
    Vec bvec, xvec, x_seq, solvec_seq, xvec_seq, rvec, solvec
@@ -57,6 +61,30 @@ MODULE fields
    CONTAINS
 
 
+   SUBROUTINE GET_B_FIELD_AT_PARTICLE(PARTICLE, B)
+
+      ! Return the configured external magnetic field in tesla.
+      ! A CSV field has precedence over the legacy constant-vector input.
+      ! Analytic solenoid, magnet and dipole fields remain in their callers.
+
+      IMPLICIT NONE
+
+      TYPE(PARTICLE_DATA_STRUCTURE), INTENT(IN) :: PARTICLE
+      REAL(KIND=8), DIMENSION(3), INTENT(OUT) :: B
+      INTEGER :: ERROR_CODE
+      CHARACTER(LEN=512) :: ERROR_MESSAGE
+
+      IF (EXTERNAL_FIELD_LOADED()) THEN
+         CALL GET_EXTERNAL_B_FIELD(PARTICLE%X, PARTICLE%Y, PARTICLE%Z, B, &
+                                   ERROR_CODE, ERROR_MESSAGE)
+         IF (ERROR_CODE /= 0) CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+      ELSE
+         B = EXTERNAL_B_FIELD
+      END IF
+
+   END SUBROUTINE GET_B_FIELD_AT_PARTICLE
+
+
 
    SUBROUTINE PETSC_INIT
 
@@ -74,25 +102,89 @@ MODULE fields
    ! SUBROUTINE ASSEMBLE_POISSON -> Prepares the linear system for the solution  !
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+   SUBROUTINE CONSOLIDATE_PERIODIC_FIELD_BCS(ERROR_CODE, ERROR_MESSAGE)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      CHARACTER(LEN=*), INTENT(OUT) :: ERROR_MESSAGE
+      INTEGER :: FIELD_DOF, NODE, REPRESENTATIVE_NODE, MEMBER_COUNT
+      LOGICAL :: HAS_DIRICHLET, HAS_CONDUCTIVE
+      REAL(KIND=8) :: DIRICHLET_VALUE
+
+      ERROR_CODE = PERIODIC_MAP_OK
+      ERROR_MESSAGE = ''
+      IF (.NOT. ALLOCATED(NODE_TO_FIELD_DOF) .OR. &
+          .NOT. ALLOCATED(FIELD_DOF_REPRESENTATIVE)) RETURN
+
+      DO FIELD_DOF = 0, FIELD_DOF_COUNT-1
+         REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(FIELD_DOF)
+         MEMBER_COUNT = 0
+         HAS_DIRICHLET = .FALSE.
+         HAS_CONDUCTIVE = .FALSE.
+         DIRICHLET_VALUE = 0.d0
+
+         DO NODE = 0, NNODES-1
+            IF (NODE_TO_FIELD_DOF(NODE) /= FIELD_DOF) CYCLE
+            MEMBER_COUNT = MEMBER_COUNT + 1
+            IF (IS_CONDUCTIVE(NODE)) HAS_CONDUCTIVE = .TRUE.
+            IF (.NOT. IS_DIRICHLET(NODE)) CYCLE
+            IF (.NOT. HAS_DIRICHLET) THEN
+               DIRICHLET_VALUE = DIRICHLET(NODE)
+               HAS_DIRICHLET = .TRUE.
+            ELSE IF (ABS(DIRICHLET(NODE)-DIRICHLET_VALUE) > &
+                     1.d-12*MAX(1.d0,ABS(DIRICHLET_VALUE),ABS(DIRICHLET(NODE)))) THEN
+               ERROR_CODE = PERIODIC_MAP_GROUP_CONFLICT
+               ERROR_MESSAGE = 'Periodic-equivalent nodes carry inconsistent Dirichlet potentials.'
+               RETURN
+            END IF
+         END DO
+
+         IF (MEMBER_COUNT > 1 .AND. HAS_CONDUCTIVE) THEN
+            ERROR_CODE = PERIODIC_MAP_GROUP_CONFLICT
+            ERROR_MESSAGE = 'Periodic field equivalence cannot be combined with conductive-node mapping.'
+            RETURN
+         END IF
+
+         IF (HAS_DIRICHLET) THEN
+            IS_DIRICHLET(REPRESENTATIVE_NODE) = .TRUE.
+            DIRICHLET(REPRESENTATIVE_NODE) = DIRICHLET_VALUE
+         END IF
+         IF (ANY(IS_NEUMANN .AND. (NODE_TO_FIELD_DOF == FIELD_DOF))) &
+            IS_NEUMANN(REPRESENTATIVE_NODE) = .TRUE.
+      END DO
+
+   END SUBROUTINE CONSOLIDATE_PERIODIC_FIELD_BCS
+
    SUBROUTINE ASSEMBLE_POISSON
 
       IMPLICIT NONE
 
       INTEGER :: I, J, IG, IPG
       INTEGER :: ICENTER, INORTH, IEAST, ISOUTH, IWEST
-      INTEGER :: SIZE
+      INTEGER :: SIZE, MATRIX_SIZE
       REAL(KIND=8) :: HX, HY
       REAL(KIND=8) :: AX, AY, BX, BY, CX, CY, H1X, H2X, H1Y, H2Y, R
       REAL(KIND=8) :: X1, X2, X3, Y1, Y2, Y3
       REAL(KIND=8) :: K11, K22, K33, K12, K23, K13, AREA, EDGELENGTH, FACEAREA
       INTEGER :: V1, V2, V3, V4
       INTEGER :: P, Q, VP, VQ, VMN
+      INTEGER :: VP_NODE, VQ_NODE, REPRESENTATIVE_NODE
+      INTEGER :: MAP_ERROR
+      LOGICAL :: VQ_CONDUCTIVE
+      CHARACTER(LEN=512) :: MAP_MESSAGE
       REAL(KIND=8) :: KIJ, VOLUME, LENGTH, BIAS
       INTEGER :: EDGE_PG
       LOGICAL, DIMENSION(:), ALLOCATABLE :: IS_UNUSED
       REAL(KIND=8) :: EPS_REL
 
+      CALL BUILD_PERIODIC_FIELD_DOF_MAP(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
       SIZE = NNODES
+      MATRIX_SIZE = FIELD_DOF_COUNT
 
       IF (.NOT. ALLOCATED(RHS)) ALLOCATE(RHS(0:SIZE-1))
       RHS = 0.d0
@@ -102,6 +194,7 @@ MODULE fields
 
       IF (.NOT. ALLOCATED(DIRICHLET)) ALLOCATE(DIRICHLET(0:SIZE-1))
       IF (.NOT. ALLOCATED(IS_DIRICHLET)) ALLOCATE(IS_DIRICHLET(0:SIZE-1))
+      DIRICHLET = 0.d0
       IS_DIRICHLET = .FALSE.
 
       IF (.NOT. ALLOCATED(NEUMANN)) ALLOCATE(NEUMANN(0:SIZE-1))
@@ -122,7 +215,7 @@ MODULE fields
 
       CALL MatDestroy(Amat,ierr)
       CALL MatCreate(PETSC_COMM_WORLD,Amat,ierr)
-      CALL MatSetSizes( Amat,PETSC_DECIDE, PETSC_DECIDE, SIZE, SIZE, ierr)
+      CALL MatSetSizes( Amat,PETSC_DECIDE, PETSC_DECIDE, MATRIX_SIZE, MATRIX_SIZE, ierr)
       CALL MatSetType( Amat, MATMPIAIJ, ierr)
       !CALL MatSetOption(Amat,MAT_SPD,PETSC_TRUE,ierr)
       CALL MatMPIAIJSetPreallocation(Amat,100,PETSC_NULL_INTEGER_ARRAY,100,PETSC_NULL_INTEGER_ARRAY, ierr)
@@ -694,6 +787,11 @@ MODULE fields
                END DO
             END IF
 
+            CALL CONSOLIDATE_PERIODIC_FIELD_BCS(MAP_ERROR, MAP_MESSAGE)
+            IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+               CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+               RETURN
+            END IF
 
             IF (PIC_TYPE == EXPLICITLIMITED) THEN
                CALL COMPUTE_DENSITY_TEMPERATURE(particles)
@@ -726,16 +824,21 @@ MODULE fields
 
                DO P = 1, 4
 
-                  VP = U3D_GRID%CELL_NODES(P,I) - 1
-                  IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
+                  VP_NODE = U3D_GRID%CELL_NODES(P,I) - 1
+                  VP = VP_NODE
+                  IF (IS_CONDUCTIVE(VP_NODE)) VP = CONDUCTOR_NODEMAP(VP_NODE)
+                  VP = NODE_TO_FIELD_DOF(VP)
                   IF (VP >= Istart .AND. VP < Iend) THEN
-                     IF (.NOT. IS_DIRICHLET(VP)) THEN
+                     IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                         DO Q = 1, 4
-                           VQ = U3D_GRID%CELL_NODES(Q,I) - 1
-                           IF (IS_CONDUCTIVE(VQ)) THEN
-                              IPG = CONDUCTOR_PGMAP(VQ)
-                              VQ = CONDUCTOR_NODEMAP(VQ)
+                           VQ_NODE = U3D_GRID%CELL_NODES(Q,I) - 1
+                           VQ_CONDUCTIVE = IS_CONDUCTIVE(VQ_NODE)
+                           VQ = VQ_NODE
+                           IF (VQ_CONDUCTIVE) THEN
+                              IPG = CONDUCTOR_PGMAP(VQ_NODE)
+                              VQ = CONDUCTOR_NODEMAP(VQ_NODE)
                            END IF
+                           VQ = NODE_TO_FIELD_DOF(VQ)
 
                            KIJ = VOLUME*(U3D_GRID%BASIS_COEFFS(1,P,I)*U3D_GRID%BASIS_COEFFS(1,Q,I) &
                                        + U3D_GRID%BASIS_COEFFS(2,P,I)*U3D_GRID%BASIS_COEFFS(2,Q,I) &
@@ -743,7 +846,7 @@ MODULE fields
 
                            IF (PIC_TYPE == EXPLICITLIMITED) KIJ = KIJ * (1. + DXLDRATIO(I))
                            CALL MatSetValue(Amat,VP,VQ,KIJ,ADD_VALUES,ierr)
-                           IF (IS_CONDUCTIVE(VQ)) THEN
+                           IF (VQ_CONDUCTIVE) THEN
                               CONNECTED_COND_SURFACES(IPG)%BIAS_RHS = CONNECTED_COND_SURFACES(IPG)%BIAS_RHS &
                               - KIJ*CONNECTED_COND_SURFACES(IPG)%BIAS_VOLTAGE
                            END IF
@@ -941,14 +1044,15 @@ MODULE fields
          END IF
       END IF
 
-
       CALL MatAssemblyBegin(Amat,MAT_FLUSH_ASSEMBLY,ierr)
       CALL MatAssemblyEnd(Amat,MAT_FLUSH_ASSEMBLY,ierr)
 
       DO I = Istart, Iend-1
-         IF (IS_DIRICHLET(I)) THEN
+         REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(I)
+         IF (IS_DIRICHLET(REPRESENTATIVE_NODE)) THEN
             CALL MatSetValue(Amat,I,I,1.d0,INSERT_VALUES,ierr)
-         ELSE IF (IS_CONDUCTIVE(I) .AND. CONDUCTOR_NODEMAP(I) /= I) THEN
+         ELSE IF (IS_CONDUCTIVE(REPRESENTATIVE_NODE) .AND. &
+                  CONDUCTOR_NODEMAP(REPRESENTATIVE_NODE) /= REPRESENTATIVE_NODE) THEN
             CALL MatSetValue(Amat,I,I,1.d0,INSERT_VALUES,ierr)
          END IF
       END DO
@@ -968,20 +1072,30 @@ MODULE fields
    SUBROUTINE ASSEMBLE_AMPERE
 
       INTEGER :: I, J
-      INTEGER :: SIZE
+      INTEGER :: SIZE, MATRIX_SIZE, MAP_ERROR, REPRESENTATIVE_NODE
+      CHARACTER(LEN=512) :: MAP_MESSAGE
       REAL(KIND=8) :: X1, X2, X3, Y1, Y2, Y3, K11, K22, K33, K12, K23, K13, AREA, VOLUME, LENGTH
       REAL(KIND=8) :: K11TILDE, K22TILDE, K33TILDE, K12TILDE, K23TILDE, K13TILDE, KIJ
-      INTEGER :: V1, V2, V3, V4, P, Q, VP, VQ
+      INTEGER :: V1, V2, V3, V4, P, Q, VP, VQ, VP_DOF, VQ_DOF
       INTEGER :: EDGE_PG
       LOGICAL, DIMENSION(:), ALLOCATABLE :: IS_UNUSED
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: J_FIELD_REDUCED
+
+      CALL BUILD_PERIODIC_FIELD_DOF_MAP(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
 
       SIZE = NNODES
+      MATRIX_SIZE = FIELD_DOF_COUNT
 
       IF (.NOT. ALLOCATED(RHS)) ALLOCATE(RHS(0:SIZE-1))
       RHS = 0.d0
 
       IF (.NOT. ALLOCATED(DIRICHLET)) ALLOCATE(DIRICHLET(0:SIZE-1))
       IF (.NOT. ALLOCATED(IS_DIRICHLET)) ALLOCATE(IS_DIRICHLET(0:SIZE-1))
+      DIRICHLET = 0.d0
       IS_DIRICHLET = .FALSE.
 
       IF (.NOT. ALLOCATED(NEUMANN)) ALLOCATE(NEUMANN(0:SIZE-1))
@@ -989,12 +1103,19 @@ MODULE fields
       IF (.NOT. ALLOCATED(IS_NEUMANN)) ALLOCATE(IS_NEUMANN(0:SIZE-1))
       IS_NEUMANN = .FALSE.
 
+      IF (.NOT. ALLOCATED(J_FIELD)) THEN
+         ALLOCATE(J_FIELD(0:SIZE-1))
+         J_FIELD = 0.d0
+      END IF
+      ALLOCATE(J_FIELD_REDUCED(0:FIELD_DOF_COUNT-1))
+      CALL REDUCE_FIELD_ARRAY(J_FIELD,J_FIELD_REDUCED)
+
 
       ! Create the matrix in Sparse Triplet format.
 
       CALL MatDestroy(Amat,ierr)
       CALL MatCreate(PETSC_COMM_WORLD,Amat,ierr)
-      CALL MatSetSizes( Amat,PETSC_DECIDE, PETSC_DECIDE, SIZE, SIZE, ierr)
+      CALL MatSetSizes( Amat,PETSC_DECIDE, PETSC_DECIDE, MATRIX_SIZE, MATRIX_SIZE, ierr)
       CALL MatSetType( Amat, MATMPIAIJ, ierr)
       !CALL MatSetOption(Amat,MAT_SPD,PETSC_TRUE,ierr)
       CALL MatMPIAIJSetPreallocation(Amat,30,PETSC_NULL_INTEGER_ARRAY,30,PETSC_NULL_INTEGER_ARRAY, ierr) !! DBDBDBDBDBDBDBDBDDBDB Large preallocation!
@@ -1308,6 +1429,11 @@ MODULE fields
 
             !IS_DIRICHLET(0) = .TRUE.    ! DBDBDBDBDBDBDBDBDBDBDBDBDBDBDBDDBDBDBDBDBDBDB
             !DIRICHLET(0) = 0.d0
+            CALL CONSOLIDATE_PERIODIC_FIELD_BCS(MAP_ERROR, MAP_MESSAGE)
+            IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+               CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+               RETURN
+            END IF
             DO I = 1, NCELLS
 
                IF (GRID_TYPE == UNSTRUCTURED .AND. DIMS == 2) THEN
@@ -1317,17 +1443,19 @@ MODULE fields
                END IF
 
                DO P = 1, 4
-                  VP = U3D_GRID%CELL_NODES(P,I) - 1
-                  IF (VP >= Istart .AND. VP < Iend) THEN
-                     IF (.NOT. IS_DIRICHLET(VP)) THEN
+                   VP = U3D_GRID%CELL_NODES(P,I) - 1
+                   VP_DOF = NODE_TO_FIELD_DOF(VP)
+                   IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                      IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                         DO Q = 1, 4
                            VQ = U3D_GRID%CELL_NODES(Q,I) - 1
+                           VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                            KIJ = VOLUME*(U3D_GRID%BASIS_COEFFS(1,P,I)*U3D_GRID%BASIS_COEFFS(1,Q,I) &
-                                       + U3D_GRID%BASIS_COEFFS(2,P,I)*U3D_GRID%BASIS_COEFFS(2,Q,I) &
-                                       + U3D_GRID%BASIS_COEFFS(3,P,I)*U3D_GRID%BASIS_COEFFS(3,Q,I))
-                           CALL MatSetValue(Amat,VP,VQ,(MASS_MATRIX(I)+1.)*KIJ,ADD_VALUES,ierr)
+                                        + U3D_GRID%BASIS_COEFFS(2,P,I)*U3D_GRID%BASIS_COEFFS(2,Q,I) &
+                                        + U3D_GRID%BASIS_COEFFS(3,P,I)*U3D_GRID%BASIS_COEFFS(3,Q,I))
+                           CALL MatSetValue(Amat,VP_DOF,VQ_DOF,(MASS_MATRIX(I)+1.)*KIJ,ADD_VALUES,ierr)
                            val = PHI_FIELD(VQ+1)*KIJ
-                           CALL VecSetValue(bvec,VP,val,ADD_VALUES,ierr)
+                           CALL VecSetValue(bvec,VP_DOF,val,ADD_VALUES,ierr)
                         END DO
                      END IF
                   END IF
@@ -1337,13 +1465,14 @@ MODULE fields
 
          END IF
 
-         DO I = Istart, Iend-1
-            IF (IS_UNUSED(I)) THEN
-               !CALL MatSetValue(Amat,I,I,1.d0,ADD_VALUES,ierr)
-               IS_DIRICHLET(I) = .TRUE.
-               DIRICHLET(I) = 0.d0
-            ELSE IF (.NOT. IS_DIRICHLET(I) ) THEN
-               val = 0.5/EPS0*J_FIELD(I)
+          DO I = Istart, Iend-1
+             REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(I)
+             IF (IS_UNUSED(REPRESENTATIVE_NODE)) THEN
+                !CALL MatSetValue(Amat,I,I,1.d0,ADD_VALUES,ierr)
+                IS_DIRICHLET(REPRESENTATIVE_NODE) = .TRUE.
+                DIRICHLET(REPRESENTATIVE_NODE) = 0.d0
+             ELSE IF (.NOT. IS_DIRICHLET(REPRESENTATIVE_NODE) ) THEN
+                val = 0.5/EPS0*J_FIELD_REDUCED(I)
                CALL VecSetValue(bvec,I,val,ADD_VALUES,ierr)
             END IF
          END DO
@@ -1357,14 +1486,20 @@ MODULE fields
       CALL MatAssemblyBegin(Amat,MAT_FLUSH_ASSEMBLY,ierr)
       CALL MatAssemblyEnd(Amat,MAT_FLUSH_ASSEMBLY,ierr)
 
+      CALL CONSOLIDATE_PERIODIC_FIELD_BCS(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
       DO I = Istart, Iend-1
-         IF (IS_DIRICHLET(I)) THEN
+         REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(I)
+         IF (IS_DIRICHLET(REPRESENTATIVE_NODE)) THEN
             CALL MatSetValue(Amat,I,I,1.d0,INSERT_VALUES,ierr)
 
-            val = DIRICHLET(I)
+            val = DIRICHLET(REPRESENTATIVE_NODE)
             CALL VecSetValue(bvec,I,val,ADD_VALUES,ierr)
-         ELSE IF (IS_NEUMANN(I)) THEN
-            val = NEUMANN(I)
+         ELSE IF (IS_NEUMANN(REPRESENTATIVE_NODE)) THEN
+            val = NEUMANN(REPRESENTATIVE_NODE)
             CALL VecSetValue(bvec,I,val,ADD_VALUES,ierr)
          END IF
       END DO
@@ -1373,6 +1508,7 @@ MODULE fields
       CALL MatAssemblyEnd(Amat,MAT_FINAL_ASSEMBLY,ierr)
       CALL VecAssemblyBegin(bvec,ierr)
       CALL VecAssemblyEnd(bvec,ierr)
+      DEALLOCATE(J_FIELD_REDUCED)
 
    END SUBROUTINE ASSEMBLE_AMPERE
 
@@ -1506,6 +1642,9 @@ MODULE fields
 
       IMPLICIT NONE
 
+      ! The startup Poisson solve uses the shared KSP handle. Release that
+      ! object before constructing the scalar Ampere correction solver.
+      CALL KSPDestroy(ksp,ierr)
       CALL KSPCreate(PETSC_COMM_WORLD,ksp,ierr)
       CALL KSPSetOperators(ksp,Amat,Amat,ierr)
 
@@ -1521,8 +1660,9 @@ MODULE fields
       CALL VecScatterEnd(ctx,xvec,X_SEQ,INSERT_VALUES,SCATTER_FORWARD,ierr)
 
       CALL VecGetArrayRead(X_SEQ,PHI_FIELD_TEMP,ierr)
-      DEALLOCATE(PHIBAR_FIELD)
-      ALLOCATE(PHIBAR_FIELD, SOURCE = PHI_FIELD_TEMP)
+      IF (ALLOCATED(PHIBAR_FIELD)) DEALLOCATE(PHIBAR_FIELD)
+      ALLOCATE(PHIBAR_FIELD(NNODES))
+      CALL EXPAND_FIELD_ARRAY(PHI_FIELD_TEMP,PHIBAR_FIELD)
       CALL VecRestoreArrayRead(X_SEQ,PHI_FIELD_TEMP,ierr)
 
       PHI_FIELD = 2*PHIBAR_FIELD-PHI_FIELD
@@ -1619,17 +1759,68 @@ MODULE fields
 
       REAL(KIND=8) :: DTHETA, THETA, WIRER, WIREZ, DIST
       REAL(KIND=8), DIMENSION(3) :: POINT, DL, RPRIME
-      INTEGER :: ICOIL, IMAG, IN, IX, IY, ITHETA, NTHETA
+      INTEGER :: ICOIL, IMAG, IN, IX, IY, ITHETA, NTHETA, NUM_FIELD_NODES
 
       NTHETA = 100
 
       DTHETA = 2*PI/REAL(NTHETA)
 
+      IF (N_SOLENOIDS == 0 .AND. N_MAGNETS == 0) RETURN
+
+      IF (GRID_TYPE /= UNSTRUCTURED) THEN
+         CALL ERROR_ABORT('Error! B field from solenoids or magnets requires an unstructured grid.')
+         RETURN
+      END IF
+
+      IF (.NOT. ALLOCATED(B_FIELD)) THEN
+         CALL ERROR_ABORT('Error! B_FIELD must be allocated before computing solenoid or magnet fields.')
+         RETURN
+      END IF
+
+      SELECT CASE (DIMS)
+      CASE (1)
+         IF (.NOT. ALLOCATED(U1D_GRID%NODE_COORDS)) THEN
+            CALL ERROR_ABORT('Error! 1D grid nodes are not available for magnetic-field evaluation.')
+            RETURN
+         END IF
+         NUM_FIELD_NODES = U1D_GRID%NUM_NODES
+      CASE (2)
+         IF (.NOT. ALLOCATED(U2D_GRID%NODE_COORDS)) THEN
+            CALL ERROR_ABORT('Error! 2D grid nodes are not available for magnetic-field evaluation.')
+            RETURN
+         END IF
+         NUM_FIELD_NODES = U2D_GRID%NUM_NODES
+      CASE (3)
+         IF (.NOT. ALLOCATED(U3D_GRID%NODE_COORDS)) THEN
+            CALL ERROR_ABORT('Error! 3D volume-grid nodes are not available for magnetic-field evaluation.')
+            RETURN
+         END IF
+         NUM_FIELD_NODES = U3D_GRID%NUM_NODES
+      CASE DEFAULT
+         CALL ERROR_ABORT('Error! Magnetic-field evaluation requires Dimensions 1, 2 or 3.')
+         RETURN
+      END SELECT
+
+      IF (SIZE(B_FIELD,1) /= 3 .OR. SIZE(B_FIELD,2) < 1 .OR. SIZE(B_FIELD,3) /= NUM_FIELD_NODES) THEN
+         CALL ERROR_ABORT('Error! B_FIELD dimensions do not match the active unstructured grid nodes.')
+         RETURN
+      END IF
+
+      ! Recompute the internal contribution from a clean array. The uniform external B field is stored separately.
+      B_FIELD = 0.d0
+
       IF (GRID_TYPE == UNSTRUCTURED) THEN
 
          DO ICOIL = 1, N_SOLENOIDS
-            DO IN = 1, U2D_GRID%NUM_NODES
-               POINT = U2D_GRID%NODE_COORDS(:, IN)
+            DO IN = 1, NUM_FIELD_NODES
+               SELECT CASE (DIMS)
+               CASE (1)
+                  POINT = U1D_GRID%NODE_COORDS(:, IN)
+               CASE (2)
+                  POINT = U2D_GRID%NODE_COORDS(:, IN)
+               CASE (3)
+                  POINT = U3D_GRID%NODE_COORDS(:, IN)
+               END SELECT
                DO IX = 1, SOLENOIDS(ICOIL)%N_WIRES_X
                   
                   IF (SOLENOIDS(ICOIL)%N_WIRES_X == 1) THEN
@@ -1673,8 +1864,15 @@ MODULE fields
          DO IMAG = 1, N_MAGNETS
             WIRER = 0.5*(MAGNETS(IMAG)%Y1+MAGNETS(IMAG)%Y2)
             WIREZ = 0.5*(MAGNETS(IMAG)%X1+MAGNETS(IMAG)%X2)
-            DO IN = 1, U2D_GRID%NUM_NODES
-               POINT = U2D_GRID%NODE_COORDS(:, IN)
+            DO IN = 1, NUM_FIELD_NODES
+               SELECT CASE (DIMS)
+               CASE (1)
+                  POINT = U1D_GRID%NODE_COORDS(:, IN)
+               CASE (2)
+                  POINT = U2D_GRID%NODE_COORDS(:, IN)
+               CASE (3)
+                  POINT = U3D_GRID%NODE_COORDS(:, IN)
+               END SELECT
                
                IF (POINT(1) > MAGNETS(IMAG)%X1 .AND. POINT(1) < MAGNETS(IMAG)%X2 &
                 .AND. POINT(2) > MAGNETS(IMAG)%Y1 .AND. POINT(2) < MAGNETS(IMAG)%Y2) CYCLE
@@ -1700,8 +1898,6 @@ MODULE fields
             END DO
          END DO
 
-      ELSE IF (N_SOLENOIDS > 0 .OR. N_MAGNETS > 0) THEN
-         CALL ERROR_ABORT('Error! B field from solenoids is only implemented for unstructured grids!')
       END IF
 
    END SUBROUTINE COMPUTE_B_FIELD_FROM_SOLENOIDS
@@ -1718,83 +1914,136 @@ MODULE fields
    ! 6 --> Boltzmann's relation (with fixed density and temperature), currently not working.
 
 
+   SUBROUTINE SETUP_POISSON_FULLY_IMPLICIT
+
+      IMPLICIT NONE
+
+      INTEGER :: MAP_ERROR, D_NNZ, O_NNZ
+      CHARACTER(LEN=512) :: MAP_MESSAGE
+      PetscBool :: SETUP_MATRIX_FREE
+
+      ! PETSc stores one unknown per periodic field class.  Geometry-node
+      ! arrays are kept expanded and are mapped by the callbacks.
+      CALL BUILD_PERIODIC_FIELD_DOF_MAP(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
+
+      IF (.NOT. ALLOCATED(RHS)) THEN
+         ALLOCATE(RHS(0:NNODES-1))
+         RHS = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(SURFACE_CHARGE)) THEN
+         ALLOCATE(SURFACE_CHARGE(0:NNODES-1))
+         SURFACE_CHARGE = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(DIRICHLET)) THEN
+         ALLOCATE(DIRICHLET(0:NNODES-1))
+         DIRICHLET = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(IS_DIRICHLET)) THEN
+         ALLOCATE(IS_DIRICHLET(0:NNODES-1))
+         IS_DIRICHLET = .FALSE.
+      END IF
+      IF (.NOT. ALLOCATED(NEUMANN)) THEN
+         ALLOCATE(NEUMANN(0:NNODES-1))
+         NEUMANN = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(IS_NEUMANN)) THEN
+         ALLOCATE(IS_NEUMANN(0:NNODES-1))
+         IS_NEUMANN = .FALSE.
+      END IF
+      IF (.NOT. ALLOCATED(IS_CONDUCTIVE)) THEN
+         ALLOCATE(IS_CONDUCTIVE(0:NNODES-1))
+         IS_CONDUCTIVE = .FALSE.
+      END IF
+      IF (.NOT. ALLOCATED(CONDUCTOR_NODEMAP)) THEN
+         ALLOCATE(CONDUCTOR_NODEMAP(0:NNODES-1))
+         CONDUCTOR_NODEMAP = -1
+      END IF
+      IF (.NOT. ALLOCATED(CONDUCTOR_PGMAP)) THEN
+         ALLOCATE(CONDUCTOR_PGMAP(0:NNODES-1))
+         CONDUCTOR_PGMAP = -1
+      END IF
+      IF (.NOT. ALLOCATED(CONDUCTOR_BIASMAP)) THEN
+         ALLOCATE(CONDUCTOR_BIASMAP(0:NNODES-1))
+         CONDUCTOR_BIASMAP = 0.d0
+      END IF
+
+      CALL CONSOLIDATE_PERIODIC_FIELD_BCS(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
+
+      CALL SNESCreate(PETSC_COMM_WORLD,snes,ierr)
+      CALL VecCreate(PETSC_COMM_WORLD,rvec,ierr)
+      CALL VecSetSizes(rvec,PETSC_DECIDE,FIELD_DOF_COUNT,ierr)
+      CALL VecSetFromOptions(rvec, ierr)
+      CALL VecDuplicate(rvec, solvec, ierr)
+
+      IF (RESIDUAL_AND_JACOBIAN_COMBINED) THEN
+         CALL SNESSetFunction(snes,rvec,FormFunctionAndJacobian,0,ierr)
+      ELSE
+         CALL SNESSetFunction(snes,rvec,FormFunction,0,ierr)
+      END IF
+
+      CALL MatCreate(PETSC_COMM_WORLD,Jmat,ierr)
+      CALL MatSetSizes(Jmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
+      CALL MatSetType(Jmat, MATMPIAIJ, ierr)
+      CALL MatCreate(PETSC_COMM_WORLD,Pmat,ierr)
+      CALL MatSetSizes(Pmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
+      CALL MatSetType(Pmat, MATMPIAIJ, ierr)
+
+      IF (DIMS == 1) THEN
+         D_NNZ = 4
+         O_NNZ = 2
+      ELSE IF (DIMS == 2) THEN
+         D_NNZ = 10
+         O_NNZ = 6
+      ELSE
+         D_NNZ = 20
+         O_NNZ = 15
+      END IF
+      CALL MatMPIAIJSetPreallocation(Jmat,D_NNZ,PETSC_NULL_INTEGER_ARRAY, &
+                                     O_NNZ,PETSC_NULL_INTEGER_ARRAY,ierr)
+      CALL MatMPIAIJSetPreallocation(Pmat,D_NNZ,PETSC_NULL_INTEGER_ARRAY, &
+                                     O_NNZ,PETSC_NULL_INTEGER_ARRAY,ierr)
+      CALL MatSetOption(Jmat,MAT_NEW_NONZERO_ALLOCATION_ERR,PETSC_FALSE,ierr)
+      CALL MatSetOption(Pmat,MAT_NEW_NONZERO_ALLOCATION_ERR,PETSC_FALSE,ierr)
+      CALL MatSetFromOptions(Jmat,ierr)
+      CALL MatSetFromOptions(Pmat,ierr)
+      CALL MatSetUp(Jmat,ierr)
+      CALL MatSetUp(Pmat,ierr)
+
+      IF (RESIDUAL_AND_JACOBIAN_COMBINED) THEN
+         CALL SNESSetJacobian(snes,Jmat,Jmat,PETSC_NULL_FUNCTION,0,ierr)
+      ELSE
+         SETUP_MATRIX_FREE = PETSC_FALSE
+         CALL PetscOptionsHasName(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER, &
+                                  "-snes_mf_operator",SETUP_MATRIX_FREE,ierr)
+         IF (SETUP_MATRIX_FREE) THEN
+            CALL SNESSetJacobian(snes,Jmat,Pmat,FormJacobian,0,ierr)
+         ELSE
+            CALL SNESSetJacobian(snes,Jmat,Jmat,FormJacobian,0,ierr)
+         END IF
+      END IF
+
+      CALL SNESSetFromOptions(snes,ierr)
+
+   END SUBROUTINE SETUP_POISSON_FULLY_IMPLICIT
+
+
    SUBROUTINE SOLVE_POISSON_FULLY_IMPLICIT
 
       LOGICAL :: SET_SOLVEC_TO_ZERO = .FALSE.
       PetscScalar, POINTER :: solvec_l(:)
-      PetscBool :: flg
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: PHI_REDUCED
 
-      CALL SNESCreate(PETSC_COMM_WORLD,snes,ierr)
-      !CALL SNESSetType(snes, SNESNEWTONLS ,ierr) ! defalut
-      !CALL SNESGetLineSearch(snes,linesearch,ierr)
-      !CALL SNESLineSearchSetType(linesearch,SNESLINESEARCHBT,ierr)
-      !CALL SNESLineSearchSetOrder(linesearch,SNES_LINESEARCH_ORDER_QUADRATIC,ierr)
-
-      CALL VecCreate(PETSC_COMM_WORLD,rvec,ierr)
-      CALL VecSetSizes(rvec,PETSC_DECIDE,NNODES,ierr)
-      CALL VecSetFromOptions(rvec, ierr)
-      CALL VecDuplicate(rvec, solvec, ierr)
-
-
-      IF (RESIDUAL_AND_JACOBIAN_COMBINED) THEN
-         CALL SNESSetFunction(snes,rvec,FormFunctionAndJacobian,0,ierr) ! Function and Jacobian computed together
-      ELSE
-         CALL SNESSetFunction(snes,rvec,FormFunction,0,ierr) ! Function and Jacobian computed separately
-      END IF
-
-
-
-      !CALL MatSetOption(Jmat,MAT_SPD,PETSC_TRUE,ierr)
-      !CALL MatMPIAIJSetPreallocation(Jmat,30,PETSC_NULL_INTEGER_ARRAY,30,PETSC_NULL_INTEGER_ARRAY,ierr) ! DBDBDBDBDBDB Large preallocation!
-      !CALL MatSetFromOptions(Jmat,ierr)
-      !CALL MatSetUp(Jmat,ierr)
-
-      !CALL MatCreate(PETSC_COMM_WORLD,Jmfmat,ierr)
-      !CALL MatSetSizes(Jmfmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
-      !CALL MatSetType(Jmfmat,MATSHELL,ierr)
-      !CALL MatSetUp(Jmfmat,ierr)
-
-
-      CALL MatCreate(PETSC_COMM_WORLD,Jmat,ierr)
-      CALL MatSetSizes(Jmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
-      CALL MatSetType(Jmat, MATMPIAIJ, ierr)
-
-      CALL MatCreate(PETSC_COMM_WORLD,Pmat,ierr)
-      CALL MatSetSizes(Pmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
-      CALL MatSetType(Pmat, MATMPIAIJ, ierr)
-
-      IF (RESIDUAL_AND_JACOBIAN_COMBINED) THEN
-         CALL SNESSetJacobian(snes,Jmat,Jmat,PETSC_NULL_FUNCTION,0,ierr)   ! Use this for the combined computation of residual and Jacobian.
-      ELSE
-         flg  = PETSC_FALSE
-         CALL PetscOptionsHasName(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,"-snes_mf_operator",flg,ierr)
-         IF (flg) THEN  ! We want only the preconditioner to be filled. The Jacobian is computed from finite differencing.
-            CALL SNESSetJacobian(snes,Jmat,Pmat,FormJacobian,0,ierr) ! The expensive but safe one. Jacobian computed independently.
-         ELSE
-            CALL SNESSetJacobian(snes,Jmat,Jmat,FormJacobian,0,ierr) ! The expensive but safe one. Jacobian computed independently.
-         END IF
-      END IF
-
-
-      !abstol = 1.d-5
-      !rtol = 1.d-5
-      !stol = 1.d0
-      !maxit = 10000 !10
-      !maxf = 10000 !30
-      !CALL SNESSetTolerances(snes, abstol, rtol, stol, maxit, maxf, ierr)
-      !CALL SNESSetTolerances(snes, PETSC_DEFAULT_REAL, PETSC_DEFAULT_REAL, PETSC_DEFAULT_REAL, maxit, maxf, ierr)
-      !CALL SNESSetTolerances(snes, PETSC_DEFAULT_REAL, SNES_RTOL, PETSC_DEFAULT_REAL, maxit, maxf, ierr)
-
-      !CALL SNESGetKSP(snes,kspnk,ierr)
-      !CALL KSPGetPC(kspnk,pcnk,ierr)
-      !CALL PCSetType(pcnk,PCLU,ierr)
-
-      !CALL KSPSetTolerances(kspnk,PETSC_DEFAULT_REAL,1.d-3,PETSC_DEFAULT_REAL,PETSC_DEFAULT_INTEGER,ierr)
-      !CALL KSPSetTolerances(ksp,1.e-4,PETSC_DEFAULT_REAL,PETSC_DEFAULT_REAL,20,ierr)
-
-      CALL SNESSetFromOptions(snes,ierr)
-
-
+      CALL SETUP_POISSON_FULLY_IMPLICIT
+      ! The setup routine owns SNES, vectors and matrices.
+      ! The remaining code initializes, solves and gathers the solution.
       !  Note: The user should initialize the vector, x, with the initial guess
       !  for the nonlinear solver prior to calling SNESSolve().  In particular,
       !  to employ an initial guess of zero, the user should explicitly set
@@ -1803,10 +2052,17 @@ MODULE fields
       IF (SET_SOLVEC_TO_ZERO) THEN
          CALL VecSet(solvec,0.d0,ierr)
       ELSE
+         IF (.NOT. ALLOCATED(PHI_FIELD)) THEN
+            ALLOCATE(PHI_FIELD(NNODES))
+            PHI_FIELD = 0.d0
+         END IF
+         ALLOCATE(PHI_REDUCED(0:FIELD_DOF_COUNT-1))
+         CALL REDUCE_FIELD_ARRAY(PHI_FIELD,PHI_REDUCED)
          CALL VecGetOwnershipRange(solvec,Istart,Iend,ierr)
          CALL VecGetArray(solvec,solvec_l,ierr)
-         solvec_l = PHI_FIELD(Istart+1:Iend)
+         solvec_l = PHI_REDUCED(Istart:Iend-1)
          CALL VecRestoreArray(solvec,solvec_l,ierr)
+         DEALLOCATE(PHI_REDUCED)
       END IF
       
       ! Test the jacobian
@@ -1833,7 +2089,8 @@ MODULE fields
 
       CALL VecGetArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
       IF (ALLOCATED(PHIBAR_FIELD)) DEALLOCATE(PHIBAR_FIELD)
-      ALLOCATE(PHIBAR_FIELD, SOURCE = PHI_FIELD_TEMP)
+      ALLOCATE(PHIBAR_FIELD(NNODES))
+      CALL EXPAND_FIELD_ARRAY(PHI_FIELD_TEMP,PHIBAR_FIELD)
       CALL VecRestoreArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
 
       PHI_FIELD = 2.*PHIBAR_FIELD - PHI_FIELD
@@ -1848,6 +2105,72 @@ MODULE fields
       CALL MatDestroy(Pmat,ierr)
 
    END SUBROUTINE SOLVE_POISSON_FULLY_IMPLICIT
+
+
+   SUBROUTINE LOAD_FULL_POTENTIAL_FROM_VECTOR(X)
+
+      IMPLICIT NONE
+
+      Vec, INTENT(IN) :: X
+
+      CALL VecScatterCreateToAll(X,ctx,x_seq,ierr)
+      CALL VecScatterBegin(ctx,X,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
+      CALL VecScatterEnd(ctx,X,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
+      CALL VecScatterDestroy(ctx, ierr)
+
+      CALL VecGetArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
+      IF (ALLOCATED(PHIBAR_FIELD)) DEALLOCATE(PHIBAR_FIELD)
+      ALLOCATE(PHIBAR_FIELD(NNODES))
+      CALL EXPAND_FIELD_ARRAY(PHI_FIELD_TEMP,PHIBAR_FIELD)
+      CALL VecRestoreArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
+      CALL VecDestroy(x_seq,ierr)
+
+      IF (.NOT. ALLOCATED(PHI_FIELD)) THEN
+         ALLOCATE(PHI_FIELD(NNODES))
+         PHI_FIELD = 0.d0
+      END IF
+      IF (ALLOCATED(PHI_FIELD_NEW)) DEALLOCATE(PHI_FIELD_NEW)
+      ALLOCATE(PHI_FIELD_NEW(NNODES))
+      PHI_FIELD_NEW = 2.d0*PHIBAR_FIELD - PHI_FIELD
+
+   END SUBROUTINE LOAD_FULL_POTENTIAL_FROM_VECTOR
+
+
+   SUBROUTINE LOAD_FULL_FIELD_FROM_FLUID_VECTOR(X)
+
+      IMPLICIT NONE
+
+      Vec, INTENT(IN) :: X
+
+      CALL VecScatterBegin(ctx,X,solvec_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
+      CALL VecScatterEnd(ctx,X,solvec_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
+      CALL VecGetArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
+      IF (ALLOCATED(PHI_FIELD_NEW)) DEALLOCATE(PHI_FIELD_NEW)
+      ALLOCATE(PHI_FIELD_NEW(NNODES))
+      CALL EXPAND_FIELD_ARRAY(PHI_FIELD_TEMP,PHI_FIELD_NEW)
+      CALL VecRestoreArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
+
+   END SUBROUTINE LOAD_FULL_FIELD_FROM_FLUID_VECTOR
+
+
+   SUBROUTINE STORE_REDUCED_RESIDUAL(F, FULL_RESIDUAL)
+
+      IMPLICIT NONE
+
+      Vec, INTENT(IN) :: F
+      REAL(KIND=8), DIMENSION(0:), INTENT(IN) :: FULL_RESIDUAL
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: REDUCED_RESIDUAL
+      PetscScalar, POINTER :: RESIDUAL_LOCAL(:)
+
+      ALLOCATE(REDUCED_RESIDUAL(0:FIELD_DOF_COUNT-1))
+      CALL REDUCE_FIELD_ARRAY(FULL_RESIDUAL,REDUCED_RESIDUAL)
+      CALL VecGetOwnershipRange(F,Istart,Iend,ierr)
+      CALL VecGetArray(F,RESIDUAL_LOCAL,ierr)
+      RESIDUAL_LOCAL = REDUCED_RESIDUAL(Istart:Iend-1)
+      CALL VecRestoreArray(F,RESIDUAL_LOCAL,ierr)
+      DEALLOCATE(REDUCED_RESIDUAL)
+
+   END SUBROUTINE STORE_REDUCED_RESIDUAL
 
 
    SUBROUTINE FormJacobianVectorProduct(jac, x, y)
@@ -1895,11 +2218,11 @@ MODULE fields
             
             ! We need to ADD to a sparse matrix entry.
             DO P = 1, 2
-               VP = U1D_GRID%CELL_NODES(P,I)
-               IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP-1)) THEN
+               VP = NODE_TO_FIELD_DOF(U1D_GRID%CELL_NODES(P,I)-1)
+               IF (VP >= Istart .AND. VP < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                      DO Q = 1, 2
-                        VQ = U1D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U1D_GRID%CELL_NODES(Q,I)-1)
                         KPQ = LENGTH*(U1D_GRID%BASIS_COEFFS(1,P,I)*U1D_GRID%BASIS_COEFFS(1,Q,I))
 
                         IF (JACOBIAN_TYPE == 3 .OR. JACOBIAN_TYPE == 4) THEN
@@ -2014,20 +2337,7 @@ MODULE fields
          WRITE(*,*) 'FormFunction Called'
       END IF
 
-      CALL VecScatterCreateToAll(x,ctx,x_seq,ierr)
-      CALL VecScatterBegin(ctx,x,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterEnd(ctx,x,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterDestroy(ctx, ierr)
-
-      ! CALL VecGetArrayRead(X_SEQ,PHI_FIELD,ierr)
-      CALL VecGetArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
-      IF (ALLOCATED(PHIBAR_FIELD)) DEALLOCATE(PHIBAR_FIELD)
-      ALLOCATE(PHIBAR_FIELD, SOURCE = PHI_FIELD_TEMP)
-      CALL VecRestoreArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
-      CALL VecDestroy(x_seq,ierr)
-
-      ! Compute the RHS corresponding to PHIBAR_FIELD
-      PHI_FIELD_NEW = 2.*PHIBAR_FIELD - PHI_FIELD
+      CALL LOAD_FULL_POTENTIAL_FROM_VECTOR(x)
 
       ALLOCATE(RHS_NEW, SOURCE = RHS)
       RHS_NEW = 0.d0
@@ -2111,19 +2421,15 @@ MODULE fields
       CALL TIMER_START(3)
       CALL ADVECT_CN_B(part_adv, .FALSE., .FALSE., Jmat)
       CALL TIMER_STOP(3)
-      CALL DEPOSIT_CHARGE(part_adv)
+      CALL DEPOSIT_CHARGE(part_adv, .FALSE.)
       IF (ALLOCATED(part_adv)) DEALLOCATE(part_adv)
 
       ! Compute the new potential from the charge distribution
       !CALL SOLVE_POISSON
 
-      ! Compute the residual
-      CALL VecGetOwnershipRange(f,Istart,Iend,ierr)
-
-      CALL VecGetArray(f,RESIDUAL,ierr_l)
-      RESIDUAL = RHS(Istart:Iend-1) - RHS_NEW(Istart:Iend-1)
-      !RESIDUAL = PHI_FIELD(Istart+1:Iend) + PHI_FIELD_OLD(Istart+1:Iend) - 2.*PHIBAR_FIELD(Istart+1:Iend)
-      CALL VecRestoreArray(f,RESIDUAL,ierr_l)
+      ! Compute the residual on geometry nodes and reduce it to periodic DOFs.
+      RHS_NEW = RHS - RHS_NEW
+      CALL STORE_REDUCED_RESIDUAL(f,RHS_NEW)
 
 
       CALL VecNorm(f,NORM_2,norm,ierr)
@@ -2131,10 +2437,12 @@ MODULE fields
          !WRITE(*,*) ' PHI_FIELD = ', PHI_FIELD
          WRITE(*,*) '||RESIDUAL|| = ', norm !, ' with potential ', PHIBAR_FIELD
 
-         WRITE(filename, "(A,A)") TRIM(ADJUSTL(RESIDUAL_SAVE_PATH)), "residuals" ! Compose filename   
-         OPEN(66331, FILE=filename, POSITION='append', STATUS='unknown', ACTION='write')
-         WRITE(66331,*) tID, norm
-         CLOSE(66331)
+         IF (LEN_TRIM(RESIDUAL_SAVE_PATH) > 0) THEN
+            WRITE(filename, "(A,A)") TRIM(ADJUSTL(RESIDUAL_SAVE_PATH)), "residuals" ! Compose filename
+            OPEN(66331, FILE=filename, POSITION='append', STATUS='unknown', ACTION='write')
+            WRITE(66331,*) tID, norm
+            CLOSE(66331)
+         END IF
       END IF
 
       DEALLOCATE(RHS_NEW)
@@ -2197,17 +2505,7 @@ MODULE fields
       CALL MatAssemblyBegin(jac,MAT_FLUSH_ASSEMBLY,ierr)
       CALL MatAssemblyEnd(jac,MAT_FLUSH_ASSEMBLY,ierr)
 
-      CALL VecScatterCreateToAll(x,ctx,x_seq,ierr)
-      CALL VecScatterBegin(ctx,x,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterEnd(ctx,x,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterDestroy(ctx, ierr)
-
-      ! CALL VecGetArrayRead(X_SEQ,PHI_FIELD,ierr)
-      CALL VecGetArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
-      IF (ALLOCATED(PHIBAR_FIELD)) DEALLOCATE(PHIBAR_FIELD)
-      ALLOCATE(PHIBAR_FIELD, SOURCE = PHI_FIELD_TEMP)
-      CALL VecRestoreArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
-      CALL VecDestroy(x_seq,ierr)
+      CALL LOAD_FULL_POTENTIAL_FROM_VECTOR(x)
 
       CALL COMPUTE_E_FIELD
 
@@ -2287,14 +2585,14 @@ MODULE fields
       IF (JACOBIAN_TYPE == 5) THEN
 
          CALL MatCreate(PETSC_COMM_WORLD,Qmat,ierr)
-         CALL MatSetSizes(Qmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
+         CALL MatSetSizes(Qmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
          CALL MatSetType(Qmat, MATMPIAIJ, ierr)
          CALL MatMPIAIJSetPreallocation(Qmat,2000,PETSC_NULL_INTEGER_ARRAY,2000,PETSC_NULL_INTEGER_ARRAY,ierr) ! DBDBDBDBDBDB Large preallocation!
          CALL MatSetFromOptions(Qmat,ierr)
          CALL MatSetUp(Qmat,ierr)
 
          CALL MatCreate(PETSC_COMM_WORLD,Rmat,ierr)
-         CALL MatSetSizes(Rmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
+         CALL MatSetSizes(Rmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
          CALL MatSetType(Rmat, MATMPIAIJ, ierr)
          CALL MatMPIAIJSetPreallocation(Rmat,2000,PETSC_NULL_INTEGER_ARRAY,2000,PETSC_NULL_INTEGER_ARRAY,ierr) ! DBDBDBDBDBDB Large preallocation!
          CALL MatSetFromOptions(Rmat,ierr)
@@ -2307,10 +2605,10 @@ MODULE fields
                FACTOR2 = 0.25*DT*DT*QE*QE*CELL_NE(I)/EPS0/ME
                ! We need to ADD to a sparse matrix entry.
                DO P = 1, 3
-                  VP = U2D_GRID%CELL_NODES(P,I)
-                  IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
+                  VP = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(P,I)-1)
+                  IF (VP >= Istart .AND. VP < Iend) THEN
                      DO Q = 1, 3
-                        VQ = U2D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(Q,I)-1)
                         IF (Q==P) THEN
                            MPQ = AREA/6.
                         ELSE
@@ -2319,9 +2617,9 @@ MODULE fields
                         KPQ = AREA*(U2D_GRID%BASIS_COEFFS(1,P,I)*U2D_GRID%BASIS_COEFFS(1,Q,I) &
                                   + U2D_GRID%BASIS_COEFFS(2,P,I)*U2D_GRID%BASIS_COEFFS(2,Q,I))
                         
-                        CALL MatSetValue(Qmat,VP-1,VQ-1,MPQ,ADD_VALUES,ierr)
-                        CALL MatSetValue(Qmat,VP-1,VQ-1,KPQ*FACTOR1,ADD_VALUES,ierr)
-                        CALL MatSetValue(Rmat,VP-1,VQ-1,KPQ*FACTOR2,ADD_VALUES,ierr)
+                        CALL MatSetValue(Qmat,VP,VQ,MPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(Qmat,VP,VQ,KPQ*FACTOR1,ADD_VALUES,ierr)
+                        CALL MatSetValue(Rmat,VP,VQ,KPQ*FACTOR2,ADD_VALUES,ierr)
                      END DO
                   END IF
                END DO
@@ -2359,18 +2657,18 @@ MODULE fields
             
             ! We need to ADD to a sparse matrix entry.
             DO P = 1, 2
-               VP = U1D_GRID%CELL_NODES(P,I)
-               IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP-1)) THEN
+               VP = NODE_TO_FIELD_DOF(U1D_GRID%CELL_NODES(P,I)-1)
+               IF (VP >= Istart .AND. VP < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                      DO Q = 1, 2
-                        VQ = U1D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U1D_GRID%CELL_NODES(Q,I)-1)
                         KPQ = LENGTH*(U2D_GRID%BASIS_COEFFS(1,P,I)*U2D_GRID%BASIS_COEFFS(1,Q,I))
 
                         IF (JACOBIAN_TYPE == 3 .OR. JACOBIAN_TYPE == 4) THEN
                            KPQ = KPQ * (MASS_MATRIX(I)+1)
                         END IF
 
-                        CALL MatSetValue(jac,VP-1,VQ-1,-2.*KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(jac,VP,VQ,-2.*KPQ,ADD_VALUES,ierr)
                      END DO
                   END IF
                END IF
@@ -2383,11 +2681,11 @@ MODULE fields
             
             ! We need to ADD to a sparse matrix entry.
             DO P = 1, 3
-               VP = U2D_GRID%CELL_NODES(P,I)
-               IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP-1)) THEN
+               VP = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(P,I)-1)
+               IF (VP >= Istart .AND. VP < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                      DO Q = 1, 3
-                        VQ = U2D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(Q,I)-1)
                         KPQ = AREA*(U2D_GRID%BASIS_COEFFS(1,P,I)*U2D_GRID%BASIS_COEFFS(1,Q,I) &
                                   + U2D_GRID%BASIS_COEFFS(2,P,I)*U2D_GRID%BASIS_COEFFS(2,Q,I))
                         
@@ -2404,7 +2702,7 @@ MODULE fields
                            KPQ = KPQ * (MASS_MATRIX(I)+1)
                         END IF
 
-                        CALL MatSetValue(jac,VP-1,VQ-1,-2.*KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(jac,VP,VQ,-2.*KPQ,ADD_VALUES,ierr)
                      END DO
                   END IF
                END IF
@@ -2417,11 +2715,11 @@ MODULE fields
             
             ! We need to ADD to a sparse matrix entry.
             DO P = 1, 4
-               VP = U3D_GRID%CELL_NODES(P,I)
-               IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP-1)) THEN
+               VP = NODE_TO_FIELD_DOF(U3D_GRID%CELL_NODES(P,I)-1)
+               IF (VP >= Istart .AND. VP < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                      DO Q = 1, 4
-                        VQ = U3D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U3D_GRID%CELL_NODES(Q,I)-1)
                         KPQ = VOLUME*(U3D_GRID%BASIS_COEFFS(1,P,I)*U3D_GRID%BASIS_COEFFS(1,Q,I) &
                                     + U3D_GRID%BASIS_COEFFS(2,P,I)*U3D_GRID%BASIS_COEFFS(2,Q,I) &
                                     + U3D_GRID%BASIS_COEFFS(3,P,I)*U3D_GRID%BASIS_COEFFS(3,Q,I))
@@ -2430,7 +2728,7 @@ MODULE fields
                            KPQ = KPQ * (MASS_MATRIX(I)+1)
                         END IF
 
-                        CALL MatSetValue(jac,VP-1,VQ-1,-2.*KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(jac,VP,VQ,-2.*KPQ,ADD_VALUES,ierr)
                      END DO
                   END IF
                END IF
@@ -2443,7 +2741,7 @@ MODULE fields
       CALL MatAssemblyEnd(jac,MAT_FLUSH_ASSEMBLY,ierr)
 
       DO I = Istart, Iend-1
-         IF (IS_DIRICHLET(I)) CALL MatSetValue(jac,I,I,-2.d0,INSERT_VALUES,ierr)
+         IF (IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(I))) CALL MatSetValue(jac,I,I,-2.d0,INSERT_VALUES,ierr)
       END DO
 
 
@@ -2533,20 +2831,7 @@ MODULE fields
 
 
 
-      CALL VecScatterCreateToAll(x,ctx,x_seq,ierr)
-      CALL VecScatterBegin(ctx,x,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterEnd(ctx,x,x_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterDestroy(ctx, ierr)
-
-      ! CALL VecGetArrayRead(X_SEQ,PHI_FIELD,ierr)
-      CALL VecGetArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
-      IF (ALLOCATED(PHIBAR_FIELD)) DEALLOCATE(PHIBAR_FIELD)
-      ALLOCATE(PHIBAR_FIELD, SOURCE = PHI_FIELD_TEMP)
-      CALL VecRestoreArrayRead(x_seq,PHI_FIELD_TEMP,ierr)
-      CALL VecDestroy(x_seq,ierr)
-
-      ! Compute the RHS corresponding to PHIBAR_FIELD
-      PHI_FIELD_NEW = 2.*PHIBAR_FIELD - PHI_FIELD
+      CALL LOAD_FULL_POTENTIAL_FROM_VECTOR(x)
 
       ALLOCATE(RHS_NEW, SOURCE = RHS)
       RHS_NEW = 0.d0
@@ -2630,20 +2915,16 @@ MODULE fields
       CALL TIMER_START(3)
       CALL ADVECT_CN_B(part_adv, .FALSE., .TRUE., Jmat)
       CALL TIMER_STOP(3)
-      CALL DEPOSIT_CHARGE(part_adv)
+      CALL DEPOSIT_CHARGE(part_adv, .FALSE.)
       IF (JACOBIAN_TYPE == 4) CALL COMPUTE_MASS_MATRICES(part_adv)
       IF (ALLOCATED(part_adv)) DEALLOCATE(part_adv)
 
       ! Compute the new potential from the charge distribution
       !CALL SOLVE_POISSON
 
-      ! Compute the residual
-      CALL VecGetOwnershipRange(f,Istart,Iend,ierr)
-
-      CALL VecGetArray(f,RESIDUAL,ierr_l)
-      RESIDUAL = RHS(Istart:Iend-1) - RHS_NEW(Istart:Iend-1)
-      !RESIDUAL = PHI_FIELD(Istart+1:Iend) + PHI_FIELD_OLD(Istart+1:Iend) - 2.*PHIBAR_FIELD(Istart+1:Iend)
-      CALL VecRestoreArray(f,RESIDUAL,ierr_l)
+      ! Compute the residual on geometry nodes and reduce it to periodic DOFs.
+      RHS_NEW = RHS - RHS_NEW
+      CALL STORE_REDUCED_RESIDUAL(f,RHS_NEW)
 
 
       CALL VecNorm(f,NORM_2,norm,ierr)
@@ -2651,10 +2932,12 @@ MODULE fields
          !WRITE(*,*) ' PHI_FIELD = ', PHI_FIELD
          WRITE(*,*) '||RESIDUAL|| = ', norm !, ' with potential ', PHIBAR_FIELD
    
-         WRITE(filename, "(A,A)") TRIM(ADJUSTL(RESIDUAL_SAVE_PATH)), "residuals" ! Compose filename   
-         OPEN(66331, FILE=filename, POSITION='append', STATUS='unknown', ACTION='write')
-         WRITE(66331,*) tID, norm
-         CLOSE(66331)
+         IF (LEN_TRIM(RESIDUAL_SAVE_PATH) > 0) THEN
+            WRITE(filename, "(A,A)") TRIM(ADJUSTL(RESIDUAL_SAVE_PATH)), "residuals" ! Compose filename
+            OPEN(66331, FILE=filename, POSITION='append', STATUS='unknown', ACTION='write')
+            WRITE(66331,*) tID, norm
+            CLOSE(66331)
+         END IF
       END IF
 
       DEALLOCATE(RHS_NEW)
@@ -2674,14 +2957,14 @@ MODULE fields
       IF (JACOBIAN_TYPE == 5) THEN
 
          CALL MatCreate(PETSC_COMM_WORLD,Qmat,ierr)
-         CALL MatSetSizes(Qmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
+         CALL MatSetSizes(Qmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
          CALL MatSetType(Qmat, MATMPIAIJ, ierr)
          CALL MatMPIAIJSetPreallocation(Qmat,2000,PETSC_NULL_INTEGER_ARRAY,2000,PETSC_NULL_INTEGER_ARRAY,ierr) ! DBDBDBDBDBDB Large preallocation!
          CALL MatSetFromOptions(Qmat,ierr)
          CALL MatSetUp(Qmat,ierr)
 
          CALL MatCreate(PETSC_COMM_WORLD,Rmat,ierr)
-         CALL MatSetSizes(Rmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
+         CALL MatSetSizes(Rmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
          CALL MatSetType(Rmat, MATMPIAIJ, ierr)
          CALL MatMPIAIJSetPreallocation(Rmat,2000,PETSC_NULL_INTEGER_ARRAY,2000,PETSC_NULL_INTEGER_ARRAY,ierr) ! DBDBDBDBDBDB Large preallocation!
          CALL MatSetFromOptions(Rmat,ierr)
@@ -2695,10 +2978,10 @@ MODULE fields
                FACTOR2 = -0.25*DT*DT*QE*QE*CELL_NE(I)/EPS0/ME
                ! We need to ADD to a sparse matrix entry.
                DO P = 1, 3
-                  VP = U2D_GRID%CELL_NODES(P,I)
-                  IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
+                  VP = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(P,I)-1)
+                  IF (VP >= Istart .AND. VP < Iend) THEN
                      DO Q = 1, 3
-                        VQ = U2D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(Q,I)-1)
                         IF (Q==P) THEN
                            MPQ = AREA/6.
                         ELSE
@@ -2707,9 +2990,9 @@ MODULE fields
                         KPQ = AREA*(U2D_GRID%BASIS_COEFFS(1,P,I)*U2D_GRID%BASIS_COEFFS(1,Q,I) &
                                   + U2D_GRID%BASIS_COEFFS(2,P,I)*U2D_GRID%BASIS_COEFFS(2,Q,I))
                         
-                        CALL MatSetValue(Qmat,VP-1,VQ-1,MPQ,ADD_VALUES,ierr)
-                        CALL MatSetValue(Qmat,VP-1,VQ-1,KPQ*FACTOR1,ADD_VALUES,ierr)
-                        CALL MatSetValue(Rmat,VP-1,VQ-1,KPQ*FACTOR2,ADD_VALUES,ierr)
+                        CALL MatSetValue(Qmat,VP,VQ,MPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(Qmat,VP,VQ,KPQ*FACTOR1,ADD_VALUES,ierr)
+                        CALL MatSetValue(Rmat,VP,VQ,KPQ*FACTOR2,ADD_VALUES,ierr)
                      END DO
                   END IF
                END DO
@@ -2760,7 +3043,7 @@ MODULE fields
                            KPQ = KPQ * (MASS_MATRIX(I)+1)
                         END IF
 
-                        CALL MatSetValue(Jmat,VP-1,VQ-1,-2.*KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(Jmat,VP,VQ,-2.*KPQ,ADD_VALUES,ierr)
                      END DO
                   END IF
                END IF
@@ -2773,11 +3056,11 @@ MODULE fields
             
             ! We need to ADD to a sparse matrix entry.
             DO P = 1, 3
-               VP = U2D_GRID%CELL_NODES(P,I)
-               IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP-1)) THEN
+               VP = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(P,I)-1)
+               IF (VP >= Istart .AND. VP < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                      DO Q = 1, 3
-                        VQ = U2D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U2D_GRID%CELL_NODES(Q,I)-1)
                         KPQ = AREA*(U2D_GRID%BASIS_COEFFS(1,P,I)*U2D_GRID%BASIS_COEFFS(1,Q,I) &
                                   + U2D_GRID%BASIS_COEFFS(2,P,I)*U2D_GRID%BASIS_COEFFS(2,Q,I))
                         
@@ -2794,7 +3077,7 @@ MODULE fields
                            KPQ = KPQ * (MASS_MATRIX(I)+1)
                         END IF
 
-                        CALL MatSetValue(Jmat,VP-1,VQ-1,-2.*KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(Jmat,VP,VQ,-2.*KPQ,ADD_VALUES,ierr)
                      END DO
                   END IF
                END IF
@@ -2807,11 +3090,11 @@ MODULE fields
             
             ! We need to ADD to a sparse matrix entry.
             DO P = 1, 4
-               VP = U3D_GRID%CELL_NODES(P,I)
-               IF (VP-1 >= Istart .AND. VP-1 < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP-1)) THEN
+               VP = NODE_TO_FIELD_DOF(U3D_GRID%CELL_NODES(P,I)-1)
+               IF (VP >= Istart .AND. VP < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP))) THEN
                      DO Q = 1, 4
-                        VQ = U3D_GRID%CELL_NODES(Q,I)
+                        VQ = NODE_TO_FIELD_DOF(U3D_GRID%CELL_NODES(Q,I)-1)
                         KPQ = VOLUME*(U3D_GRID%BASIS_COEFFS(1,P,I)*U3D_GRID%BASIS_COEFFS(1,Q,I) &
                                     + U3D_GRID%BASIS_COEFFS(2,P,I)*U3D_GRID%BASIS_COEFFS(2,Q,I) &
                                     + U3D_GRID%BASIS_COEFFS(3,P,I)*U3D_GRID%BASIS_COEFFS(3,Q,I))
@@ -2820,7 +3103,7 @@ MODULE fields
                            KPQ = KPQ * (MASS_MATRIX(I)+1)
                         END IF
 
-                        CALL MatSetValue(Jmat,VP-1,VQ-1,-2.*KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(Jmat,VP,VQ,-2.*KPQ,ADD_VALUES,ierr)
                      END DO
                   END IF
                END IF
@@ -2833,7 +3116,7 @@ MODULE fields
       CALL MatAssemblyEnd(Jmat,MAT_FLUSH_ASSEMBLY,ierr)
 
       DO I = Istart, Iend-1
-         IF (IS_DIRICHLET(I)) CALL MatSetValue(Jmat,I,I,-2.d0,INSERT_VALUES,ierr)
+         IF (IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(I))) CALL MatSetValue(Jmat,I,I,-2.d0,INSERT_VALUES,ierr)
       END DO
 
       CALL MatAssemblyBegin(Jmat,MAT_FINAL_ASSEMBLY,ierr)
@@ -4416,25 +4699,107 @@ MODULE fields
 
 
 
+   SUBROUTINE INTERPOLATE_LINEAR_SIMPLEX_B(DIMS, POSITION, CELL_NODES, BASIS_COEFFS, B_FIELD, B)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: DIMS
+      REAL(KIND=8), DIMENSION(3), INTENT(IN) :: POSITION
+      INTEGER, DIMENSION(:), INTENT(IN) :: CELL_NODES
+      REAL(KIND=8), DIMENSION(:,:), INTENT(IN) :: BASIS_COEFFS
+      REAL(KIND=8), DIMENSION(:,:,:), INTENT(IN) :: B_FIELD
+      REAL(KIND=8), DIMENSION(3), INTENT(OUT) :: B
+
+      INTEGER :: J, NUM_VERTICES
+      REAL(KIND=8) :: PSI
+
+      B = 0.d0
+
+      SELECT CASE (DIMS)
+      CASE (1)
+         NUM_VERTICES = 2
+      CASE (2)
+         NUM_VERTICES = 3
+      CASE (3)
+         NUM_VERTICES = 4
+      CASE DEFAULT
+         RETURN
+      END SELECT
+
+      DO J = 1, NUM_VERTICES
+         PSI = DOT_PRODUCT(BASIS_COEFFS(1:DIMS,J), POSITION(1:DIMS)) + BASIS_COEFFS(DIMS+1,J)
+         B = B + B_FIELD(:,1,CELL_NODES(J))*PSI
+      END DO
+
+   END SUBROUTINE INTERPOLATE_LINEAR_SIMPLEX_B
+
+
    SUBROUTINE APPLY_B_FIELD(JP, B)
 
       IMPLICIT NONE
 
       REAL(KIND=8), DIMENSION(3), INTENT(OUT) :: B
       INTEGER, INTENT(IN) :: JP
-      INTEGER :: J, VJ, IC
-      REAL(KIND=8) :: PSIJ
+      INTEGER :: IC
 
       IC = particles(JP)%IC
       B = 0.d0
       IF (GRID_TYPE == UNSTRUCTURED) THEN
-         DO J = 1, 3
-            VJ = U2D_GRID%CELL_NODES(J, IC)
-            PSIJ = particles(JP)%X*U2D_GRID%BASIS_COEFFS(1,J,IC) &
-                 + particles(JP)%Y*U2D_GRID%BASIS_COEFFS(2,J,IC) &
-                 + U2D_GRID%BASIS_COEFFS(3,J,IC)
-            B = B + B_FIELD(:, 1, VJ)*PSIJ
-         END DO
+         IF (.NOT. ALLOCATED(B_FIELD)) THEN
+            CALL ERROR_ABORT('Error! B_FIELD is not allocated while applying the particle magnetic field.')
+            RETURN
+         END IF
+
+         SELECT CASE (DIMS)
+         CASE (1)
+            IF (.NOT. ALLOCATED(U1D_GRID%CELL_NODES) .OR. .NOT. ALLOCATED(U1D_GRID%BASIS_COEFFS)) THEN
+               CALL ERROR_ABORT('Error! 1D cell data are not available for magnetic-field interpolation.')
+               RETURN
+            END IF
+            IF (IC < 1 .OR. IC > U1D_GRID%NUM_CELLS) THEN
+               CALL ERROR_ABORT('Error! Particle cell index is outside the 1D grid in APPLY_B_FIELD.')
+               RETURN
+            END IF
+            IF (SIZE(B_FIELD,3) /= U1D_GRID%NUM_NODES) THEN
+               CALL ERROR_ABORT('Error! B_FIELD nodes do not match the 1D grid in APPLY_B_FIELD.')
+               RETURN
+            END IF
+            CALL INTERPOLATE_LINEAR_SIMPLEX_B(DIMS, [particles(JP)%X, particles(JP)%Y, particles(JP)%Z], &
+               U1D_GRID%CELL_NODES(:,IC), U1D_GRID%BASIS_COEFFS(:,:,IC), B_FIELD, B)
+         CASE (2)
+            IF (.NOT. ALLOCATED(U2D_GRID%CELL_NODES) .OR. .NOT. ALLOCATED(U2D_GRID%BASIS_COEFFS)) THEN
+               CALL ERROR_ABORT('Error! 2D cell data are not available for magnetic-field interpolation.')
+               RETURN
+            END IF
+            IF (IC < 1 .OR. IC > U2D_GRID%NUM_CELLS) THEN
+               CALL ERROR_ABORT('Error! Particle cell index is outside the 2D grid in APPLY_B_FIELD.')
+               RETURN
+            END IF
+            IF (SIZE(B_FIELD,3) /= U2D_GRID%NUM_NODES) THEN
+               CALL ERROR_ABORT('Error! B_FIELD nodes do not match the 2D grid in APPLY_B_FIELD.')
+               RETURN
+            END IF
+            CALL INTERPOLATE_LINEAR_SIMPLEX_B(DIMS, [particles(JP)%X, particles(JP)%Y, particles(JP)%Z], &
+               U2D_GRID%CELL_NODES(:,IC), U2D_GRID%BASIS_COEFFS(:,:,IC), B_FIELD, B)
+         CASE (3)
+            IF (.NOT. ALLOCATED(U3D_GRID%CELL_NODES) .OR. .NOT. ALLOCATED(U3D_GRID%BASIS_COEFFS)) THEN
+               CALL ERROR_ABORT('Error! 3D tetrahedron data are not available for magnetic-field interpolation.')
+               RETURN
+            END IF
+            IF (IC < 1 .OR. IC > U3D_GRID%NUM_CELLS) THEN
+               CALL ERROR_ABORT('Error! Particle cell index is outside the 3D grid in APPLY_B_FIELD.')
+               RETURN
+            END IF
+            IF (SIZE(B_FIELD,3) /= U3D_GRID%NUM_NODES) THEN
+               CALL ERROR_ABORT('Error! B_FIELD nodes do not match the 3D volume grid in APPLY_B_FIELD.')
+               RETURN
+            END IF
+            CALL INTERPOLATE_LINEAR_SIMPLEX_B(DIMS, [particles(JP)%X, particles(JP)%Y, particles(JP)%Z], &
+               U3D_GRID%CELL_NODES(:,IC), U3D_GRID%BASIS_COEFFS(:,:,IC), B_FIELD, B)
+         CASE DEFAULT
+            CALL ERROR_ABORT('Error! APPLY_B_FIELD supports only Dimensions 1, 2 or 3 on unstructured grids.')
+            RETURN
+         END SELECT
       END IF
 
 
@@ -4559,18 +4924,87 @@ MODULE fields
    !!!! SOLVE_POISSON_FLUID Solve Poisson's equation !!!!!!
    !!!!  with FLUID ELECTRONS as NON-LINEAR TERM     !!!!!!
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   LOGICAL FUNCTION CELL_VOLUME_IS_FLUID(CELL_PG)
+
+      IMPLICIT NONE
+      INTEGER, INTENT(IN) :: CELL_PG
+
+      IF (CELL_PG == -1) THEN
+         CELL_VOLUME_IS_FLUID = .TRUE.
+      ELSE
+         CELL_VOLUME_IS_FLUID = (GRID_BC(CELL_PG)%VOLUME_BC /= SOLID)
+      END IF
+
+   END FUNCTION CELL_VOLUME_IS_FLUID
+
+
    SUBROUTINE SETUP_POISSON_FLUID
 
       IMPLICIT NONE
 
       PetscInt :: d_nnz, o_nnz
+      INTEGER :: MAP_ERROR
+      CHARACTER(LEN=512) :: MAP_MESSAGE
+
+      CALL BUILD_PERIODIC_FIELD_DOF_MAP(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
+
+      IF (.NOT. ALLOCATED(RHS)) THEN
+         ALLOCATE(RHS(0:NNODES-1))
+         RHS = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(SURFACE_CHARGE)) THEN
+         ALLOCATE(SURFACE_CHARGE(0:NNODES-1))
+         SURFACE_CHARGE = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(DIRICHLET)) THEN
+         ALLOCATE(DIRICHLET(0:NNODES-1))
+         DIRICHLET = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(IS_DIRICHLET)) THEN
+         ALLOCATE(IS_DIRICHLET(0:NNODES-1))
+         IS_DIRICHLET = .FALSE.
+      END IF
+      IF (.NOT. ALLOCATED(NEUMANN)) THEN
+         ALLOCATE(NEUMANN(0:NNODES-1))
+         NEUMANN = 0.d0
+      END IF
+      IF (.NOT. ALLOCATED(IS_NEUMANN)) THEN
+         ALLOCATE(IS_NEUMANN(0:NNODES-1))
+         IS_NEUMANN = .FALSE.
+      END IF
+      IF (.NOT. ALLOCATED(IS_CONDUCTIVE)) THEN
+         ALLOCATE(IS_CONDUCTIVE(0:NNODES-1))
+         IS_CONDUCTIVE = .FALSE.
+      END IF
+      IF (.NOT. ALLOCATED(CONDUCTOR_NODEMAP)) THEN
+         ALLOCATE(CONDUCTOR_NODEMAP(0:NNODES-1))
+         CONDUCTOR_NODEMAP = -1
+      END IF
+      IF (.NOT. ALLOCATED(CONDUCTOR_PGMAP)) THEN
+         ALLOCATE(CONDUCTOR_PGMAP(0:NNODES-1))
+         CONDUCTOR_PGMAP = -1
+      END IF
+      IF (.NOT. ALLOCATED(CONDUCTOR_BIASMAP)) THEN
+         ALLOCATE(CONDUCTOR_BIASMAP(0:NNODES-1))
+         CONDUCTOR_BIASMAP = 0.d0
+      END IF
+
+      CALL CONSOLIDATE_PERIODIC_FIELD_BCS(MAP_ERROR, MAP_MESSAGE)
+      IF (MAP_ERROR /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(MAP_MESSAGE))
+         RETURN
+      END IF
 
       ! Create SNES environment
       CALL SNESCreate(PETSC_COMM_WORLD,snes,ierr)
 
       ! Create rvec (for FormFunctionFluid) and solvec (for the solution)
       CALL VecCreate(PETSC_COMM_WORLD,rvec,ierr)
-      CALL VecSetSizes(rvec,PETSC_DECIDE,NNODES,ierr)
+      CALL VecSetSizes(rvec,PETSC_DECIDE,FIELD_DOF_COUNT,ierr)
       CALL VecSetFromOptions(rvec, ierr)
       CALL VecDuplicate(rvec, solvec, ierr)
 
@@ -4579,7 +5013,7 @@ MODULE fields
 
       ! Initialize Jacobian Matrix
       CALL MatCreate(PETSC_COMM_WORLD,Jmat,ierr)
-      CALL MatSetSizes(Jmat,PETSC_DECIDE,PETSC_DECIDE,NNODES,NNODES,ierr)
+      CALL MatSetSizes(Jmat,PETSC_DECIDE,PETSC_DECIDE,FIELD_DOF_COUNT,FIELD_DOF_COUNT,ierr)
       CALL MatSetType(Jmat, MATMPIAIJ, ierr)
 
       IF (DIMS == 1) THEN
@@ -4612,6 +5046,7 @@ MODULE fields
       IMPLICIT NONE
 
       PetscScalar, POINTER :: solvec_l(:)
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: PHI_REDUCED
 
       ! Initialize solution vector
       IF (.NOT. ALLOCATED(PHI_FIELD)) THEN
@@ -4619,10 +5054,13 @@ MODULE fields
          PHI_FIELD = 0.d0
          CALL VecSet(solvec,0.d0,ierr)
       ELSE
+         ALLOCATE(PHI_REDUCED(0:FIELD_DOF_COUNT-1))
+         CALL REDUCE_FIELD_ARRAY(PHI_FIELD,PHI_REDUCED)
          CALL VecGetOwnershipRange(solvec,Istart,Iend,ierr)
          CALL VecGetArray(solvec,solvec_l,ierr)
-         solvec_l = PHI_FIELD(Istart+1:Iend)
+         solvec_l = PHI_REDUCED(Istart:Iend-1)
          CALL VecRestoreArray(solvec,solvec_l,ierr)
+         DEALLOCATE(PHI_REDUCED)
       END IF
 
       ! ------ SOLVE ------
@@ -4637,7 +5075,8 @@ MODULE fields
 
       CALL VecGetArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
       IF (ALLOCATED(PHI_FIELD)) DEALLOCATE(PHI_FIELD)
-      ALLOCATE(PHI_FIELD, SOURCE = PHI_FIELD_TEMP)
+      ALLOCATE(PHI_FIELD(NNODES))
+      CALL EXPAND_FIELD_ARRAY(PHI_FIELD_TEMP,PHI_FIELD)
       CALL VecRestoreArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
 
       IF (BOOL_CONDUCTIVE_BC) CALL ASSIGN_CONDUCTIVE_PHI
@@ -4671,22 +5110,17 @@ MODULE fields
       PetscScalar, POINTER :: RESIDUAL(:)
       CHARACTER(LEN=512)  :: filename
 
-      INTEGER :: I, IC, IFLUID, P, Q, VP, VQ
+      INTEGER :: I, IC, IFLUID, P, Q, VP, VQ, VP_DOF, VQ_DOF, VQ_NODE
       INTEGER :: V1, V2, V3, V4, VMN, FACE_PG
       REAL(KIND=8) :: Y1, Y2, Y3
       REAL(KIND=8) :: EPS_REL, KPQ, VALUETOADD, LENGTH, AREA, VOLUME
       REAL(KIND=8) :: KQ, N0, T0, PHI0, KAPPA
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: RHS_NEW_REDUCED
+      INTEGER :: REPRESENTATIVE_NODE
 
       IF (MOD(tID, STATS_EVERY) .EQ. 0) CALL ONLYMASTERPRINT1(PROC_ID, 'FormFunctionFluid Called')
       
-      CALL VecScatterBegin(ctx,x,solvec_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterEnd(ctx,x,solvec_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-   
-      
-      CALL VecGetArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
-      IF (ALLOCATED(PHI_FIELD_NEW)) DEALLOCATE(PHI_FIELD_NEW)
-      ALLOCATE(PHI_FIELD_NEW, SOURCE = PHI_FIELD_TEMP)
-      CALL VecRestoreArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
+      CALL LOAD_FULL_FIELD_FROM_FLUID_VECTOR(x)
 
       ALLOCATE(RHS_NEW, SOURCE = RHS)
       RHS_NEW = 0.d0
@@ -4707,15 +5141,18 @@ MODULE fields
             DO P = 1, 2
                VP = U1D_GRID%CELL_NODES(P,IC) - 1
                IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
-               IF (VP >= Istart .AND. VP < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP)) THEN
+               VP_DOF = NODE_TO_FIELD_DOF(VP)
+               IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                      DO Q = 1, 2
-                        VQ = U1D_GRID%CELL_NODES(Q,IC) - 1
-                        IF (IS_CONDUCTIVE(VQ)) VQ = CONDUCTOR_NODEMAP(VQ)
+                        VQ_NODE = U1D_GRID%CELL_NODES(Q,IC) - 1
+                        VQ = VQ_NODE
+                        IF (IS_CONDUCTIVE(VQ_NODE)) VQ = CONDUCTOR_NODEMAP(VQ_NODE)
+                        VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                         KPQ = LENGTH*(U1D_GRID%BASIS_COEFFS(1,P,IC)*U1D_GRID%BASIS_COEFFS(1,Q,IC))*EPS_REL
 
-                        IF (IS_CONDUCTIVE(VQ)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
-                        RHS_NEW(VP) = RHS_NEW(VP) + KPQ*PHI_FIELD_NEW(VQ+1)
+                        IF (IS_CONDUCTIVE(VQ_NODE)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
+                        RHS_NEW(VP_DOF) = RHS_NEW(VP_DOF) + KPQ*PHI_FIELD_NEW(VQ+1)
 
                         !!! FLUID ELECTRONS !!!
 
@@ -4744,8 +5181,8 @@ MODULE fields
                         ELSE
                            VALUETOADD = VALUETOADD/6.
                         END IF
-                        IF (GRID_BC(U1D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
-                           RHS_NEW(VP) = RHS_NEW(VP) + VALUETOADD
+                        IF (CELL_VOLUME_IS_FLUID(U1D_GRID%CELL_PG(IC))) THEN
+                           RHS_NEW(VP_DOF) = RHS_NEW(VP_DOF) + VALUETOADD
                         END IF
                      END DO
                   END IF
@@ -4766,11 +5203,14 @@ MODULE fields
             DO P = 1, 3
                VP = U2D_GRID%CELL_NODES(P,IC) - 1
                IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
-               IF (VP >= Istart .AND. VP < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP)) THEN
+               VP_DOF = NODE_TO_FIELD_DOF(VP)
+               IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                      DO Q = 1, 3
-                        VQ = U2D_GRID%CELL_NODES(Q,IC) - 1
-                        IF (IS_CONDUCTIVE(VQ)) VQ = CONDUCTOR_NODEMAP(VQ)
+                        VQ_NODE = U2D_GRID%CELL_NODES(Q,IC) - 1
+                        VQ = VQ_NODE
+                        IF (IS_CONDUCTIVE(VQ_NODE)) VQ = CONDUCTOR_NODEMAP(VQ_NODE)
+                        VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                         KPQ = AREA*(U2D_GRID%BASIS_COEFFS(1,P,IC)*U2D_GRID%BASIS_COEFFS(1,Q,IC) &
                                     + U2D_GRID%BASIS_COEFFS(2,P,IC)*U2D_GRID%BASIS_COEFFS(2,Q,IC))*EPS_REL
 
@@ -4785,8 +5225,8 @@ MODULE fields
                            KPQ = KPQ*(Y1+Y2+Y3)/3.
                         END IF
 
-                        IF (IS_CONDUCTIVE(VQ)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
-                        RHS_NEW(VP) = RHS_NEW(VP) + KPQ*PHI_FIELD_NEW(VQ+1)
+                        IF (IS_CONDUCTIVE(VQ_NODE)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
+                        RHS_NEW(VP_DOF) = RHS_NEW(VP_DOF) + KPQ*PHI_FIELD_NEW(VQ+1)
 
                         !!! FLUID ELECTRONS !!!
 
@@ -4839,8 +5279,8 @@ MODULE fields
                            END IF
                         END IF
 
-                        IF (GRID_BC(U2D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
-                           RHS_NEW(VP) = RHS_NEW(VP) + VALUETOADD
+                        IF (CELL_VOLUME_IS_FLUID(U2D_GRID%CELL_PG(IC))) THEN
+                           RHS_NEW(VP_DOF) = RHS_NEW(VP_DOF) + VALUETOADD
                         END IF
                      END DO
                   END IF
@@ -4860,17 +5300,20 @@ MODULE fields
             DO P = 1, 4
                VP = U3D_GRID%CELL_NODES(P,IC) - 1
                IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
-               IF (VP >= Istart .AND. VP < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP)) THEN
+               VP_DOF = NODE_TO_FIELD_DOF(VP)
+               IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                      DO Q = 1, 4
-                        VQ = U3D_GRID%CELL_NODES(Q,IC) - 1
-                        IF (IS_CONDUCTIVE(VQ)) VQ = CONDUCTOR_NODEMAP(VQ)
+                        VQ_NODE = U3D_GRID%CELL_NODES(Q,IC) - 1
+                        VQ = VQ_NODE
+                        IF (IS_CONDUCTIVE(VQ_NODE)) VQ = CONDUCTOR_NODEMAP(VQ_NODE)
+                        VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                         KPQ = VOLUME*(U3D_GRID%BASIS_COEFFS(1,P,IC)*U3D_GRID%BASIS_COEFFS(1,Q,IC) &
                                     + U3D_GRID%BASIS_COEFFS(2,P,IC)*U3D_GRID%BASIS_COEFFS(2,Q,IC) &
                                     + U3D_GRID%BASIS_COEFFS(3,P,IC)*U3D_GRID%BASIS_COEFFS(3,Q,IC))*EPS_REL
 
-                        IF (IS_CONDUCTIVE(VQ)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
-                        RHS_NEW(VP) = RHS_NEW(VP) + KPQ*PHI_FIELD_NEW(VQ+1)
+                        IF (IS_CONDUCTIVE(VQ_NODE)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
+                        RHS_NEW(VP_DOF) = RHS_NEW(VP_DOF) + KPQ*PHI_FIELD_NEW(VQ+1)
 
                         !!!! FLUID ELECTRONS !!!
 
@@ -4900,8 +5343,8 @@ MODULE fields
                            VALUETOADD = VALUETOADD/20.
                         END IF
 
-                        IF (GRID_BC(U3D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
-                           RHS_NEW(VP) = RHS_NEW(VP) + VALUETOADD
+                        IF (CELL_VOLUME_IS_FLUID(U3D_GRID%CELL_PG(IC))) THEN
+                           RHS_NEW(VP_DOF) = RHS_NEW(VP_DOF) + VALUETOADD
                         END IF
                      END DO
                   END IF
@@ -4910,32 +5353,37 @@ MODULE fields
          END DO 
       END IF
 
-      DO I = 0, NNODES-1
-         IF (IS_DIRICHLET(I)) THEN
-            ! RHS_NEW(I-1) = DIRICHLET(I-1)
-            RHS_NEW(I) = PHI_FIELD_NEW(I+1)
-         ELSE IF (IS_CONDUCTIVE(I) .AND. CONDUCTOR_NODEMAP(I) /= I) THEN
-            RHS_NEW(I) = PHI_FIELD_NEW(I+1)
-         ELSE IF (IS_NEUMANN(I)) THEN
-            RHS_NEW(I) = RHS_NEW(I) + NEUMANN(I)
+      ALLOCATE(RHS_NEW_REDUCED(0:FIELD_DOF_COUNT-1))
+      RHS_NEW_REDUCED = RHS_NEW(0:FIELD_DOF_COUNT-1)
+      DO I = 0, FIELD_DOF_COUNT-1
+         REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(I)
+         IF (IS_DIRICHLET(REPRESENTATIVE_NODE)) THEN
+            RHS_NEW_REDUCED(I) = PHI_FIELD_NEW(REPRESENTATIVE_NODE+1)
+         ELSE IF (IS_CONDUCTIVE(REPRESENTATIVE_NODE) .AND. &
+                  CONDUCTOR_NODEMAP(REPRESENTATIVE_NODE) /= REPRESENTATIVE_NODE) THEN
+            RHS_NEW_REDUCED(I) = PHI_FIELD_NEW(REPRESENTATIVE_NODE+1)
+         ELSE IF (IS_NEUMANN(REPRESENTATIVE_NODE)) THEN
+            RHS_NEW_REDUCED(I) = RHS_NEW_REDUCED(I) + NEUMANN(REPRESENTATIVE_NODE)
          END IF
       END DO
+      CALL EXPAND_FIELD_ARRAY(RHS_NEW_REDUCED,RHS_NEW)
+      DEALLOCATE(RHS_NEW_REDUCED)
 
-      ! Compute the residual
-      CALL VecGetOwnershipRange(f,Istart,Iend,ierr)
-      CALL VecGetArray(f,RESIDUAL,ierr_l)
-      RESIDUAL = RHS_NEW(Istart:Iend-1) - RHS(Istart:Iend-1)
-      CALL VecRestoreArray(f,RESIDUAL,ierr_l)
+      ! Compute and reduce the residual on geometry nodes.
+      RHS_NEW = RHS_NEW - RHS
+      CALL STORE_REDUCED_RESIDUAL(f,RHS_NEW)
 
 
       CALL VecNorm(f,NORM_2,norm,ierr)
 
       IF (PROC_ID == 0) THEN
          IF (MOD(tID, STATS_EVERY) .EQ. 0) WRITE(*,*) '||RESIDUAL|| = ', norm
-         WRITE(filename, "(A,A)") TRIM(ADJUSTL(RESIDUAL_SAVE_PATH)), "residuals" ! Compose filename   
-         OPEN(66331, FILE=filename, POSITION='append', STATUS='unknown', ACTION='write')
-         WRITE(66331,*) tID, norm
-         CLOSE(66331)
+         IF (LEN_TRIM(RESIDUAL_SAVE_PATH) > 0) THEN
+            WRITE(filename, "(A,A)") TRIM(ADJUSTL(RESIDUAL_SAVE_PATH)), "residuals" ! Compose filename
+            OPEN(66331, FILE=filename, POSITION='append', STATUS='unknown', ACTION='write')
+            WRITE(66331,*) tID, norm
+            CLOSE(66331)
+         END IF
       END IF
 
       DEALLOCATE(RHS_NEW)
@@ -4954,7 +5402,7 @@ MODULE fields
       PetscScalar    mat_value
       INTEGER dummy(*)
 
-      INTEGER :: I, IC, IFLUID, P, Q, VP, VQ
+      INTEGER :: I, IC, IFLUID, P, Q, VP, VQ, VP_DOF, VQ_DOF, VQ_NODE
       INTEGER :: V1, V2, V3, V4, VMN, FACE_PG
       REAL(KIND=8) :: Y1, Y2, Y3
       REAL(KIND=8) :: EPS_REL, KPQ, VALUETOADD, FACTOR, LENGTH, AREA, VOLUME
@@ -4969,13 +5417,7 @@ MODULE fields
       ! CALL MatAssemblyBegin(jac, MAT_FLUSH_ASSEMBLY, ierr)
       ! CALL MatAssemblyEnd(jac, MAT_FLUSH_ASSEMBLY, ierr)
 
-      CALL VecScatterBegin(ctx,x,solvec_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-      CALL VecScatterEnd(ctx,x,solvec_seq,INSERT_VALUES,SCATTER_FORWARD,ierr)
-
-      CALL VecGetArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
-      IF (ALLOCATED(PHI_FIELD_NEW)) DEALLOCATE(PHI_FIELD_NEW)
-      ALLOCATE(PHI_FIELD_NEW, SOURCE = PHI_FIELD_TEMP)
-      CALL VecRestoreArrayRead(solvec_seq,PHI_FIELD_TEMP,ierr)
+      CALL LOAD_FULL_FIELD_FROM_FLUID_VECTOR(x)
 
 
       CALL MatGetOwnershipRange( jac, Istart, Iend, ierr)
@@ -4996,16 +5438,19 @@ MODULE fields
             DO P = 1, 2
                VP = U1D_GRID%CELL_NODES(P,IC) - 1
                IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
-               IF (VP >= Istart .AND. VP < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP)) THEN
+               VP_DOF = NODE_TO_FIELD_DOF(VP)
+               IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                      DO Q = 1, 2
-                        VQ = U1D_GRID%CELL_NODES(Q,IC) - 1
-                        IF (IS_CONDUCTIVE(VQ)) VQ = CONDUCTOR_NODEMAP(VQ)
+                        VQ_NODE = U1D_GRID%CELL_NODES(Q,IC) - 1
+                        VQ = VQ_NODE
+                        IF (IS_CONDUCTIVE(VQ_NODE)) VQ = CONDUCTOR_NODEMAP(VQ_NODE)
+                        VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                         KPQ = LENGTH*(U1D_GRID%BASIS_COEFFS(1,P,IC)*U1D_GRID%BASIS_COEFFS(1,Q,IC))*EPS_REL
-                        CALL MatSetValue(jac,VP,VQ,KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(jac,VP_DOF,VQ_DOF,KPQ,ADD_VALUES,ierr)
 
                         !!! FLUID ELECTRONS !!!
-                        IF (IS_CONDUCTIVE(VQ)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
+                        IF (IS_CONDUCTIVE(VQ_NODE)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
 
                         
                         VALUETOADD = 0
@@ -5034,8 +5479,8 @@ MODULE fields
                         ELSE
                            VALUETOADD = VALUETOADD/6.
                         END IF
-                        IF (GRID_BC(U1D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
-                           CALL MatSetValue(jac,VP,VQ,VALUETOADD,ADD_VALUES,ierr)
+                        IF (CELL_VOLUME_IS_FLUID(U1D_GRID%CELL_PG(IC))) THEN
+                           CALL MatSetValue(jac,VP_DOF,VQ_DOF,VALUETOADD,ADD_VALUES,ierr)
                         END IF
                      END DO
                   END IF
@@ -5056,11 +5501,14 @@ MODULE fields
             DO P = 1, 3
                VP = U2D_GRID%CELL_NODES(P,IC) - 1
                IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
-               IF (VP >= Istart .AND. VP < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP)) THEN
+               VP_DOF = NODE_TO_FIELD_DOF(VP)
+               IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                      DO Q = 1, 3
-                        VQ = U2D_GRID%CELL_NODES(Q,IC) - 1
-                        IF (IS_CONDUCTIVE(VQ)) VQ = CONDUCTOR_NODEMAP(VQ)
+                        VQ_NODE = U2D_GRID%CELL_NODES(Q,IC) - 1
+                        VQ = VQ_NODE
+                        IF (IS_CONDUCTIVE(VQ_NODE)) VQ = CONDUCTOR_NODEMAP(VQ_NODE)
+                        VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                         KPQ = AREA*(U2D_GRID%BASIS_COEFFS(1,P,IC)*U2D_GRID%BASIS_COEFFS(1,Q,IC) &
                                     + U2D_GRID%BASIS_COEFFS(2,P,IC)*U2D_GRID%BASIS_COEFFS(2,Q,IC))*EPS_REL
 
@@ -5074,11 +5522,11 @@ MODULE fields
 
                            KPQ = KPQ*(Y1+Y2+Y3)/3.
                         END IF
-                        CALL MatSetValue(jac,VP,VQ,KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(jac,VP_DOF,VQ_DOF,KPQ,ADD_VALUES,ierr)
 
                         !!! FLUID ELECTRONS !!!
 
-                        IF (IS_CONDUCTIVE(VQ)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
+                        IF (IS_CONDUCTIVE(VQ_NODE)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
 
                         VALUETOADD = 0
                         DO IFLUID = 1, N_ELECTRON_FLUIDS
@@ -5130,8 +5578,8 @@ MODULE fields
                               VALUETOADD = VALUETOADD*(2*Y1+2*Y2+Y3)/5.
                            END IF
                         END IF
-                        IF (GRID_BC(U2D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
-                           CALL MatSetValue(jac,VP,VQ,VALUETOADD,ADD_VALUES,ierr)
+                        IF (CELL_VOLUME_IS_FLUID(U2D_GRID%CELL_PG(IC))) THEN
+                           CALL MatSetValue(jac,VP_DOF,VQ_DOF,VALUETOADD,ADD_VALUES,ierr)
                         END IF
                      END DO
                   END IF
@@ -5153,20 +5601,23 @@ MODULE fields
             DO P = 1, 4
                VP = U3D_GRID%CELL_NODES(P,IC) - 1
                IF (IS_CONDUCTIVE(VP)) VP = CONDUCTOR_NODEMAP(VP)
-               IF (VP >= Istart .AND. VP < Iend) THEN
-                  IF (.NOT. IS_DIRICHLET(VP)) THEN
+               VP_DOF = NODE_TO_FIELD_DOF(VP)
+               IF (VP_DOF >= Istart .AND. VP_DOF < Iend) THEN
+                  IF (.NOT. IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(VP_DOF))) THEN
                      DO Q = 1, 4
-                        VQ = U3D_GRID%CELL_NODES(Q,IC) - 1
-                        IF (IS_CONDUCTIVE(VQ)) VQ = CONDUCTOR_NODEMAP(VQ)
+                        VQ_NODE = U3D_GRID%CELL_NODES(Q,IC) - 1
+                        VQ = VQ_NODE
+                        IF (IS_CONDUCTIVE(VQ_NODE)) VQ = CONDUCTOR_NODEMAP(VQ_NODE)
+                        VQ_DOF = NODE_TO_FIELD_DOF(VQ)
                         KPQ = VOLUME*(U3D_GRID%BASIS_COEFFS(1,P,IC)*U3D_GRID%BASIS_COEFFS(1,Q,IC) &
                                     + U3D_GRID%BASIS_COEFFS(2,P,IC)*U3D_GRID%BASIS_COEFFS(2,Q,IC) &
                                     + U3D_GRID%BASIS_COEFFS(3,P,IC)*U3D_GRID%BASIS_COEFFS(3,Q,IC))*EPS_REL
-                        CALL MatSetValue(jac,VP,VQ,KPQ,ADD_VALUES,ierr)
+                        CALL MatSetValue(jac,VP_DOF,VQ_DOF,KPQ,ADD_VALUES,ierr)
                         
                         
                         !!! FLUID ELECTRONS !!!
 
-                        IF (IS_CONDUCTIVE(VQ)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
+                        IF (IS_CONDUCTIVE(VQ_NODE)) PHI_FIELD_NEW(VQ+1) = PHI_FIELD_NEW(VQ+1) + CONDUCTOR_BIASMAP(VQ)
 
                         VALUETOADD = 0
                         DO IFLUID = 1, N_ELECTRON_FLUIDS
@@ -5194,8 +5645,8 @@ MODULE fields
                         ELSE
                            VALUETOADD = VALUETOADD/20.
                         END IF
-                        IF (GRID_BC(U3D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
-                           CALL MatSetValue(jac,VP,VQ,VALUETOADD,ADD_VALUES,ierr)
+                        IF (CELL_VOLUME_IS_FLUID(U3D_GRID%CELL_PG(IC))) THEN
+                           CALL MatSetValue(jac,VP_DOF,VQ_DOF,VALUETOADD,ADD_VALUES,ierr)
                         END IF
                      END DO
                   END IF
@@ -5209,9 +5660,10 @@ MODULE fields
       CALL MatAssemblyEnd(jac, MAT_FLUSH_ASSEMBLY, ierr)
 
       DO I = Istart, Iend-1
-         IF (IS_DIRICHLET(I)) THEN
+         IF (IS_DIRICHLET(FIELD_DOF_REPRESENTATIVE(I))) THEN
             CALL MatSetValue(jac,I,I,1.d0,INSERT_VALUES,ierr)
-         ELSE IF (IS_CONDUCTIVE(I) .AND. CONDUCTOR_NODEMAP(I) /= I) THEN
+         ELSE IF (IS_CONDUCTIVE(FIELD_DOF_REPRESENTATIVE(I)) .AND. &
+                  CONDUCTOR_NODEMAP(FIELD_DOF_REPRESENTATIVE(I)) /= FIELD_DOF_REPRESENTATIVE(I)) THEN
             CALL MatSetValue(jac,I,I,1.d0,INSERT_VALUES,ierr)
          END IF
       END DO
@@ -5254,7 +5706,7 @@ MODULE fields
                   IF ( (GRID_BC(FACE_PG)%FIELD_BC == DIELECTRIC_BC & 
                      .OR. GRID_BC(FACE_PG)%FIELD_BC == CONDUCTIVE_BC &
                      .OR. GRID_BC(FACE_PG)%FIELD_BC == SPICE_NODE_BC) & 
-                     .AND. GRID_BC(U1D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
+                     .AND. CELL_VOLUME_IS_FLUID(U1D_GRID%CELL_PG(IC))) THEN
 
                      V1 = U1D_GRID%CELL_NODES(IP,IC)
                      AREA = 1. ! Flux should be on unit surface
@@ -5307,7 +5759,7 @@ MODULE fields
                   IF ( (GRID_BC(FACE_PG)%FIELD_BC == DIELECTRIC_BC &
                      .OR.GRID_BC(FACE_PG)%FIELD_BC == CONDUCTIVE_BC &
                      .OR. GRID_BC(FACE_PG)%FIELD_BC == SPICE_NODE_BC) &
-                     .AND. GRID_BC(U2D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
+                     .AND. CELL_VOLUME_IS_FLUID(U2D_GRID%CELL_PG(IC))) THEN
 
                      ! VV1 = 1 + MOD(IP-1,3)
                      ! VV2 = 1 + MOD(IP,3)
@@ -5394,7 +5846,7 @@ MODULE fields
                   IF ((GRID_BC(FACE_PG)%FIELD_BC == DIELECTRIC_BC &
                      .OR. GRID_BC(FACE_PG)%FIELD_BC == CONDUCTIVE_BC &
                      .OR. GRID_BC(FACE_PG)%FIELD_BC == SPICE_NODE_BC) &
-                     .AND. GRID_BC(U3D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
+                     .AND. CELL_VOLUME_IS_FLUID(U3D_GRID%CELL_PG(IC))) THEN
                      IF (IP == 1) THEN
                         VV1 = 1
                         VV2 = 3
@@ -5485,7 +5937,7 @@ MODULE fields
 
       IF (DIMS == 1) THEN
          DO IC = 1, NCELLS
-            IF (GRID_BC(U1D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
+                        IF (CELL_VOLUME_IS_FLUID(U1D_GRID%CELL_PG(IC))) THEN
                DO IP = 1, 2
                   V = U1D_GRID%CELL_NODES(IP,IC)
                   DO IFLUID = 1, N_ELECTRON_FLUIDS
@@ -5507,7 +5959,7 @@ MODULE fields
          END DO
       ELSE IF (DIMS == 2) THEN
          DO IC=1, NCELLS
-            IF (GRID_BC(U2D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
+                        IF (CELL_VOLUME_IS_FLUID(U2D_GRID%CELL_PG(IC))) THEN
                DO IP = 1, 3
                   V = U2D_GRID%CELL_NODES(IP,IC)
 
@@ -5530,7 +5982,7 @@ MODULE fields
          END DO
       ELSE IF (DIMS==3) THEN
          DO IC=1, NCELLS
-            IF (GRID_BC(U3D_GRID%CELL_PG(IC))%VOLUME_BC .NE. SOLID) THEN
+                        IF (CELL_VOLUME_IS_FLUID(U3D_GRID%CELL_PG(IC))) THEN
                DO IP = 1, 4
                   V = U3D_GRID%CELL_NODES(IP,IC)
                   DO IFLUID = 1, N_ELECTRON_FLUIDS
@@ -5588,6 +6040,7 @@ MODULE fields
    SUBROUTINE SOLVE_POISSON
 
       IMPLICIT NONE
+      INTEGER :: I
 
       ! Solve the linear system  (Amat*PHI_FIELD = bvec)
       CALL KSPSolve(ksp,bvec,xvec,ierr)
@@ -5602,7 +6055,10 @@ MODULE fields
 
       CALL VecGetArrayRead(xvec_seq,PHI_FIELD_TEMP,ierr)
       IF (ALLOCATED(PHI_FIELD)) DEALLOCATE(PHI_FIELD)
-      ALLOCATE(PHI_FIELD, SOURCE = PHI_FIELD_TEMP)
+      ALLOCATE(PHI_FIELD(NNODES))
+      DO I = 0, NNODES-1
+         PHI_FIELD(I+1) = PHI_FIELD_TEMP(NODE_TO_FIELD_DOF(I)+1)
+      END DO
       CALL VecRestoreArrayRead(xvec_seq,PHI_FIELD_TEMP,ierr)
 
       CALL VecScatterDestroy(ctx,ierr)
@@ -5822,10 +6278,12 @@ MODULE fields
    ! SUBROUTINE DEPOSIT_CHARGE -> Deposits the charge of particles on grid points !
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-   SUBROUTINE DEPOSIT_CHARGE(part_adv)
+   SUBROUTINE DEPOSIT_CHARGE(part_adv, ASSEMBLE_FIELD_VECTOR)
       
       IMPLICIT NONE
       TYPE(PARTICLE_DATA_STRUCTURE), DIMENSION(:), INTENT(IN) :: part_adv
+      LOGICAL, OPTIONAL, INTENT(IN) :: ASSEMBLE_FIELD_VECTOR
+      LOGICAL :: BUILD_FIELD_VECTOR
       INTEGER :: JP, I, J, IC, IG
 
 
@@ -5834,11 +6292,17 @@ MODULE fields
       REAL(KIND=8), DIMENSION(4) :: WEIGHTS
       INTEGER, DIMENSION(4) :: INDICES, INDI, INDJ
       INTEGER :: SIZE, P, VP, VMN
+      INTEGER :: FIELD_DOF, REPRESENTATIVE_NODE
       INTEGER :: V1, V2, V3, V4
       REAL(KIND=8) :: PSIP
 
       INTEGER :: EDGE_PG
       REAL(KIND=8) :: AREA
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: RHS_REDUCED, NEUMANN_REDUCED
+      CHARACTER(LEN=512) :: ERROR_MESSAGE
+
+      BUILD_FIELD_VECTOR = .TRUE.
+      IF (PRESENT(ASSEMBLE_FIELD_VECTOR)) BUILD_FIELD_VECTOR = ASSEMBLE_FIELD_VECTOR
 
       K = QE/(EPS0*EPS_SCALING**2) ! [V m] Elementary charge / Dielectric constant of vacuum
 
@@ -5941,30 +6405,48 @@ MODULE fields
          END DO
       END IF
 
-      DO I = Istart, Iend-1
-         IF (IS_DIRICHLET(I)) THEN
-            val = DIRICHLET(I)
-         ELSE IF (IS_NEUMANN(I)) THEN
-            val = RHS(I) + NEUMANN(I)
-         ELSE
-            val = RHS(I)
-         END IF
+      CALL CONSOLIDATE_PERIODIC_FIELD_BCS(I, ERROR_MESSAGE)
+      IF (I /= PERIODIC_MAP_OK) THEN
+         CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+         RETURN
+      END IF
 
-         CALL VecSetValue(bvec,I,val,INSERT_VALUES,ierr)
-      END DO
+      ALLOCATE(RHS_REDUCED(0:FIELD_DOF_COUNT-1))
+      ALLOCATE(NEUMANN_REDUCED(0:FIELD_DOF_COUNT-1))
+      CALL REDUCE_FIELD_ARRAY(RHS, RHS_REDUCED)
+      CALL REDUCE_FIELD_ARRAY(NEUMANN, NEUMANN_REDUCED)
 
+      IF (BUILD_FIELD_VECTOR) THEN
+         DO FIELD_DOF = Istart, Iend-1
+            REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(FIELD_DOF)
+            IF (IS_DIRICHLET(REPRESENTATIVE_NODE)) THEN
+               val = DIRICHLET(REPRESENTATIVE_NODE)
+            ELSE IF (IS_NEUMANN(REPRESENTATIVE_NODE)) THEN
+               val = RHS_REDUCED(FIELD_DOF) + NEUMANN_REDUCED(FIELD_DOF)
+            ELSE
+               val = RHS_REDUCED(FIELD_DOF)
+            END IF
 
-      CALL VecAssemblyBegin(bvec,ierr)
-      CALL VecAssemblyEnd(bvec,ierr)
+            CALL VecSetValue(bvec,FIELD_DOF,val,INSERT_VALUES,ierr)
+         END DO
+
+         CALL VecAssemblyBegin(bvec,ierr)
+         CALL VecAssemblyEnd(bvec,ierr)
+      END IF
 
 
       DO I = 0, NNODES-1
-         IF (IS_DIRICHLET(I)) THEN
-            RHS(I) = DIRICHLET(I)
-         ELSE IF (IS_NEUMANN(I)) THEN
-            RHS(I) = RHS(I) + NEUMANN(I)
+         FIELD_DOF = NODE_TO_FIELD_DOF(I)
+         REPRESENTATIVE_NODE = FIELD_DOF_REPRESENTATIVE(FIELD_DOF)
+         IF (IS_DIRICHLET(REPRESENTATIVE_NODE)) THEN
+            RHS(I) = DIRICHLET(REPRESENTATIVE_NODE)
+         ELSE IF (IS_NEUMANN(REPRESENTATIVE_NODE)) THEN
+            RHS(I) = RHS_REDUCED(FIELD_DOF) + NEUMANN_REDUCED(FIELD_DOF)
          END IF
       END DO
+
+      DEALLOCATE(RHS_REDUCED)
+      DEALLOCATE(NEUMANN_REDUCED)
 
    END SUBROUTINE DEPOSIT_CHARGE
 
@@ -6462,8 +6944,7 @@ MODULE fields
             IF (PIC_TYPE .NE. NONE) THEN
                E = EBAR_FIELD(:, 1, IC) ! CALL APPLY_E_FIELD(IP, E)
                
-               B = 0
-               B = B + EXTERNAL_B_FIELD
+               CALL GET_B_FIELD_AT_PARTICLE(part_adv(IP), B)
                ! CALL APPLY_RF_EB_FIELD(part_adv, IP, E, B)
 
             ELSE
@@ -7068,7 +7549,7 @@ MODULE fields
       !CALL VecDestroy(vals,ierr)
       !CALL VecDestroy(cols,ierr)
 
-      IF ((tID .GT. DUMP_PART_BOUND_START) .AND. (tID .NE. RESTART_TIMESTEP)) THEN
+      IF (FINAL .AND. (tID .GT. DUMP_PART_BOUND_START) .AND. (tID .NE. RESTART_TIMESTEP)) THEN
          IF (MOD(tID-DUMP_PART_BOUND_START, DUMP_PART_BOUND_EVERY) .EQ. 0) THEN
             CALL DUMP_BOUNDARY_PARTICLES_FILE(tID)
             IF (ALLOCATED(part_dump)) DEALLOCATE(part_dump)

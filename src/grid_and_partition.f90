@@ -22,8 +22,21 @@ MODULE grid_and_partition
    USE mpi_common
    USE screen
    USE tools
+   USE periodic_mesh_utils, ONLY: MATCH_PERIODIC_TRIANGLE, PERIODIC_MESH_OK, &
+                                  PERIODIC_MESH_NO_MATCH, PERIODIC_MESH_AMBIGUOUS
+   USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
 
    IMPLICIT NONE
+
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_OK = 0
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_INVALID_GRID = 1
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_INVALID_BOUNDARY = 2
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_BAD_TRANSLATION = 3
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_NO_PARTNER = 4
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_AMBIGUOUS = 5
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_BAD_GEOMETRY = 6
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_GROUP_CONFLICT = 7
+   INTEGER, PARAMETER, PUBLIC :: PERIODIC_MAP_BAD_FIELD_TOPOLOGY = 8
  
    CONTAINS
 
@@ -348,6 +361,604 @@ MODULE grid_and_partition
 
    END SUBROUTINE ASSIGN_CELLS_TO_PROCS
 
+
+   SUBROUTINE VALIDATE_PERIODIC_BOUNDARY_GROUPS
+
+      IMPLICIT NONE
+
+      INTEGER :: IPG, NUM_GROUP_FACES, ERROR_CODE
+      LOGICAL :: HAS_PERIODIC_MASTER
+      CHARACTER(LEN=512) :: ERROR_MESSAGE
+      REAL(KIND=8) :: MATCH_TOLERANCE
+
+      IF (.NOT. ALLOCATED(GRID_BC)) RETURN
+
+      HAS_PERIODIC_MASTER = .FALSE.
+      DO IPG = 1, N_GRID_BC
+         IF (.NOT. ANY(GRID_BC(IPG)%PARTICLE_BC == PERIODIC_MASTER)) CYCLE
+         HAS_PERIODIC_MASTER = .TRUE.
+
+         NUM_GROUP_FACES = 0
+         IF (GRID_TYPE /= UNSTRUCTURED) THEN
+            CALL ERROR_ABORT('Periodic master boundary groups require an unstructured mesh.')
+            RETURN
+         END IF
+
+         SELECT CASE (DIMS)
+         CASE (1)
+            IF (.NOT. ALLOCATED(U1D_GRID%CELL_EDGES_PG)) THEN
+               CALL ERROR_ABORT('Periodic master group has no 1D boundary-element map.')
+               RETURN
+            END IF
+            NUM_GROUP_FACES = COUNT(U1D_GRID%CELL_EDGES_PG == IPG)
+         CASE (2)
+            IF (.NOT. ALLOCATED(U2D_GRID%CELL_EDGES_PG)) THEN
+               CALL ERROR_ABORT('Periodic master group has no 2D boundary-element map.')
+               RETURN
+            END IF
+            NUM_GROUP_FACES = COUNT(U2D_GRID%CELL_EDGES_PG == IPG)
+         CASE (3)
+            IF (.NOT. ALLOCATED(U3D_GRID%CELL_FACES_PG)) THEN
+               CALL ERROR_ABORT('Periodic master group has no 3D boundary-face map.')
+               RETURN
+            END IF
+            NUM_GROUP_FACES = COUNT(U3D_GRID%CELL_FACES_PG == IPG)
+         CASE DEFAULT
+            CALL ERROR_ABORT('Periodic master boundary groups require Dimensions 1, 2 or 3.')
+            RETURN
+         END SELECT
+
+         IF (NUM_GROUP_FACES == 0) THEN
+            WRITE(*,'(A,A)') 'Periodic master group has no mapped boundary elements: ', &
+                             TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME)
+            CALL ERROR_ABORT('Check the physical group name and mesh boundary elements.')
+            RETURN
+         END IF
+      END DO
+
+      IF (HAS_PERIODIC_MASTER .AND. DIMS == 3) THEN
+         CALL BUILD_PERIODIC_BOUNDARY_FACE_MAP(ERROR_CODE, ERROR_MESSAGE, MATCH_TOLERANCE)
+         IF (ERROR_CODE /= PERIODIC_MAP_OK) THEN
+            IF (PROC_ID == 0) THEN
+               WRITE(*,'(A)') TRIM(ERROR_MESSAGE)
+               IF (MATCH_TOLERANCE > 0.d0) &
+                  WRITE(*,'(A,ES14.6)') 'Periodic face-matching tolerance: ', MATCH_TOLERANCE
+               IF (ERROR_CODE == PERIODIC_MAP_NO_PARTNER) &
+                  WRITE(*,'(A)') 'Periodic pairing stopped at the first unmatched face (count at least 1).'
+               IF (ERROR_CODE == PERIODIC_MAP_AMBIGUOUS) &
+                  WRITE(*,'(A)') 'Periodic pairing stopped at the first ambiguous/reused face (count at least 1).'
+            END IF
+            CALL ERROR_ABORT('3D periodic boundary-face pairing failed during initialization.')
+         END IF
+         IF (PROC_ID == 0) THEN
+            WRITE(*,'(A,ES14.6)') 'Periodic face-matching tolerance: ', MATCH_TOLERANCE
+            WRITE(*,'(A,I0,A)') '3D periodic pairing summary: pairs=', &
+               U3D_GRID%NUM_PERIODIC_FACE_PAIRS, ', unmatched=0, ambiguous=0.'
+         END IF
+      END IF
+
+      ! Some geometry-only unit tests intentionally construct U3D_GRID without
+      ! populating the global NNODES counter; field mapping is deferred until
+      ! the production initialization path has both values available.
+      IF (DIMS == 3 .AND. GRID_TYPE == UNSTRUCTURED .AND. NNODES > 0) THEN
+         CALL BUILD_PERIODIC_FIELD_DOF_MAP(ERROR_CODE, ERROR_MESSAGE)
+         IF (ERROR_CODE /= PERIODIC_MAP_OK) THEN
+            IF (PROC_ID == 0) WRITE(*,'(A)') TRIM(ERROR_MESSAGE)
+            CALL ERROR_ABORT('3D periodic field-degree-of-freedom mapping failed during initialization.')
+         END IF
+      END IF
+
+   END SUBROUTINE VALIDATE_PERIODIC_BOUNDARY_GROUPS
+
+
+   SUBROUTINE BUILD_PERIODIC_FIELD_DOF_MAP(ERROR_CODE, ERROR_MESSAGE)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      CHARACTER(LEN=*), INTENT(OUT) :: ERROR_MESSAGE
+
+      INTEGER :: I, J, IC, IFACE, PARTNER_CELL, PARTNER_FACE
+      INTEGER :: SOURCE_NODE, TARGET_NODE, TARGET_VERTEX, ROOT_I, ROOT_J
+      INTEGER :: NUMBER_OF_ROOTS, CURRENT_DOF
+      INTEGER, DIMENSION(:), ALLOCATABLE :: PARENT, ROOT_TO_DOF
+
+      ERROR_CODE = PERIODIC_MAP_OK
+      ERROR_MESSAGE = ''
+
+      IF (NNODES < 1) THEN
+         ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+         ERROR_MESSAGE = 'Periodic field mapping requires at least one mesh node.'
+         RETURN
+      END IF
+      IF (DIMS /= 3 .OR. GRID_TYPE /= UNSTRUCTURED) THEN
+         IF (ALLOCATED(NODE_TO_FIELD_DOF)) DEALLOCATE(NODE_TO_FIELD_DOF)
+         IF (ALLOCATED(FIELD_DOF_REPRESENTATIVE)) DEALLOCATE(FIELD_DOF_REPRESENTATIVE)
+         FIELD_DOF_COUNT = NNODES
+         ALLOCATE(NODE_TO_FIELD_DOF(0:NNODES-1))
+         ALLOCATE(FIELD_DOF_REPRESENTATIVE(0:NNODES-1))
+         DO I = 0, NNODES-1
+            NODE_TO_FIELD_DOF(I) = I
+            FIELD_DOF_REPRESENTATIVE(I) = I
+         END DO
+         RETURN
+      END IF
+      IF (.NOT. ALLOCATED(U3D_GRID%NODE_COORDS) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%FACE_NODES) .OR. &
+          U3D_GRID%NUM_NODES /= NNODES) THEN
+         ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+         ERROR_MESSAGE = 'Periodic field mapping found inconsistent 3D node storage.'
+         RETURN
+      END IF
+
+      IF (ALLOCATED(NODE_TO_FIELD_DOF)) DEALLOCATE(NODE_TO_FIELD_DOF)
+      IF (ALLOCATED(FIELD_DOF_REPRESENTATIVE)) DEALLOCATE(FIELD_DOF_REPRESENTATIVE)
+      ALLOCATE(NODE_TO_FIELD_DOF(0:NNODES-1))
+
+      ALLOCATE(PARENT(0:NNODES-1))
+      DO I = 0, NNODES-1
+         PARENT(I) = I
+      END DO
+
+      IF (ALLOCATED(U3D_GRID%PERIODIC_PARTNER_CELL) .AND. &
+          ALLOCATED(U3D_GRID%PERIODIC_PARTNER_FACE) .AND. &
+          ALLOCATED(U3D_GRID%PERIODIC_VERTEX_PERM)) THEN
+         DO IC = 1, U3D_GRID%NUM_CELLS
+            DO IFACE = 1, 4
+               PARTNER_CELL = U3D_GRID%PERIODIC_PARTNER_CELL(IFACE,IC)
+               IF (PARTNER_CELL < 1) CYCLE
+               PARTNER_FACE = U3D_GRID%PERIODIC_PARTNER_FACE(IFACE,IC)
+               IF (PARTNER_CELL > U3D_GRID%NUM_CELLS .OR. PARTNER_FACE < 1 .OR. PARTNER_FACE > 4) THEN
+                  ERROR_CODE = PERIODIC_MAP_BAD_FIELD_TOPOLOGY
+                  ERROR_MESSAGE = 'Periodic field mapping found an invalid partner cell or face.'
+                  DEALLOCATE(PARENT)
+                  RETURN
+               END IF
+               DO J = 1, 3
+                  TARGET_VERTEX = U3D_GRID%PERIODIC_VERTEX_PERM(J,IFACE,IC)
+                  IF (TARGET_VERTEX < 1 .OR. TARGET_VERTEX > 3) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_FIELD_TOPOLOGY
+                     ERROR_MESSAGE = 'Periodic field mapping found an invalid face-vertex permutation.'
+                     DEALLOCATE(PARENT)
+                     RETURN
+                  END IF
+                  SOURCE_NODE = U3D_GRID%FACE_NODES(J,IFACE,IC)
+                  TARGET_NODE = U3D_GRID%FACE_NODES(TARGET_VERTEX,PARTNER_FACE,PARTNER_CELL)
+                  IF (SOURCE_NODE < 1 .OR. SOURCE_NODE > NNODES .OR. &
+                      TARGET_NODE < 1 .OR. TARGET_NODE > NNODES) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_FIELD_TOPOLOGY
+                     ERROR_MESSAGE = 'Periodic field mapping found a partner node outside the mesh.'
+                     DEALLOCATE(PARENT)
+                     RETURN
+                  END IF
+
+                  ROOT_I = FIND_PERIODIC_NODE_ROOT(PARENT,SOURCE_NODE-1)
+                  ROOT_J = FIND_PERIODIC_NODE_ROOT(PARENT,TARGET_NODE-1)
+                  IF (ROOT_I /= ROOT_J) PARENT(MAX(ROOT_I,ROOT_J)) = MIN(ROOT_I,ROOT_J)
+               END DO
+            END DO
+         END DO
+      END IF
+
+      DO I = 0, NNODES-1
+         PARENT(I) = FIND_PERIODIC_NODE_ROOT(PARENT,I)
+      END DO
+
+      NUMBER_OF_ROOTS = COUNT([(PARENT(I) == I, I=0,NNODES-1)])
+      FIELD_DOF_COUNT = NUMBER_OF_ROOTS
+      ALLOCATE(FIELD_DOF_REPRESENTATIVE(0:FIELD_DOF_COUNT-1))
+      ALLOCATE(ROOT_TO_DOF(0:NNODES-1))
+      ROOT_TO_DOF = -1
+
+      CURRENT_DOF = 0
+      DO I = 0, NNODES-1
+         IF (PARENT(I) /= I) CYCLE
+         FIELD_DOF_REPRESENTATIVE(CURRENT_DOF) = I
+         ROOT_TO_DOF(I) = CURRENT_DOF
+         CURRENT_DOF = CURRENT_DOF + 1
+      END DO
+
+      DO I = 0, NNODES-1
+         NODE_TO_FIELD_DOF(I) = ROOT_TO_DOF(PARENT(I))
+      END DO
+
+      IF (ANY(NODE_TO_FIELD_DOF < 0) .OR. ANY(NODE_TO_FIELD_DOF >= FIELD_DOF_COUNT)) THEN
+         ERROR_CODE = PERIODIC_MAP_BAD_FIELD_TOPOLOGY
+         ERROR_MESSAGE = 'Periodic field mapping produced an invalid compressed degree of freedom.'
+      END IF
+
+      DEALLOCATE(ROOT_TO_DOF)
+      DEALLOCATE(PARENT)
+
+   CONTAINS
+
+      RECURSIVE INTEGER FUNCTION FIND_PERIODIC_NODE_ROOT(PARENT_ARRAY, NODE) RESULT(ROOT)
+         INTEGER, DIMENSION(0:), INTENT(INOUT) :: PARENT_ARRAY
+         INTEGER, INTENT(IN) :: NODE
+         IF (PARENT_ARRAY(NODE) == NODE) THEN
+            ROOT = NODE
+         ELSE
+            PARENT_ARRAY(NODE) = FIND_PERIODIC_NODE_ROOT(PARENT_ARRAY,PARENT_ARRAY(NODE))
+            ROOT = PARENT_ARRAY(NODE)
+         END IF
+      END FUNCTION FIND_PERIODIC_NODE_ROOT
+
+   END SUBROUTINE BUILD_PERIODIC_FIELD_DOF_MAP
+
+
+   SUBROUTINE BUILD_PERIODIC_BOUNDARY_FACE_MAP(ERROR_CODE, ERROR_MESSAGE, MATCH_TOLERANCE_USED)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      CHARACTER(LEN=*), INTENT(OUT) :: ERROR_MESSAGE
+      REAL(KIND=8), INTENT(OUT), OPTIONAL :: MATCH_TOLERANCE_USED
+
+      INTEGER :: IC, IFACE, IPG, PG, I, AXIS, N_BOUNDARY_FACES, N_CANDIDATES
+      INTEGER :: MASTER_FACE_COUNT, SLAVE_FACE_COUNT, SLAVE_GROUP, MATCH_COUNT
+      INTEGER :: MASTER_CELL, MASTER_FACE, CANDIDATE_INDEX, CANDIDATE_CELL, CANDIDATE_FACE
+      INTEGER :: CANDIDATE_GROUP, MATCHED_CELL, MATCHED_FACE, MATCHED_GROUP
+      INTEGER :: LOWER, UPPER, MIDPOINT, REVERSE_PERMUTATION(3), GEOMETRY_STATUS
+      REAL(KIND=8) :: L_REF, COORDINATE_SCALE, ABS_TOL, REL_TOL, TOLERANCE
+      REAL(KIND=8) :: EXPECTED_CENTROID_AXIS, AREA_TOLERANCE
+      REAL(KIND=8), DIMENSION(3) :: EXTENT, MASTER_CENTROID, CANDIDATE_CENTROID
+      REAL(KIND=8), DIMENSION(3) :: MASTER_NORMAL, CANDIDATE_NORMAL, TRANSLATION
+      REAL(KIND=8), DIMENSION(3,3) :: MASTER_COORDS, CANDIDATE_COORDS
+      REAL(KIND=8), DIMENSION(3) :: NORMALIZED_MASTER, NORMALIZED_CANDIDATE
+      INTEGER, DIMENSION(3) :: VERTEX_PERMUTATION, MATCHED_PERMUTATION
+      INTEGER, DIMENSION(:), ALLOCATABLE :: CANDIDATE_CELLS, CANDIDATE_FACES
+      INTEGER, DIMENSION(:), ALLOCATABLE :: CANDIDATE_GROUPS, CANDIDATE_ORDER
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: CANDIDATE_AXIS_COORDS
+      LOGICAL, DIMENSION(:), ALLOCATABLE :: IS_MASTER_GROUP, IS_SLAVE_GROUP
+      LOGICAL, DIMENSION(:,:), ALLOCATABLE :: USED_PARTNER_FACE
+      LOGICAL :: FACE_METRICS_VALID
+
+      ERROR_CODE = PERIODIC_MAP_OK
+      ERROR_MESSAGE = ''
+      IF (PRESENT(MATCH_TOLERANCE_USED)) MATCH_TOLERANCE_USED = 0.d0
+      U3D_GRID%NUM_PERIODIC_FACE_PAIRS = 0
+
+      IF (DIMS /= 3 .OR. GRID_TYPE /= UNSTRUCTURED .OR. .NOT. ALLOCATED(GRID_BC) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%NODE_COORDS) .OR. .NOT. ALLOCATED(U3D_GRID%FACE_NODES) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%FACE_NORMAL) .OR. .NOT. ALLOCATED(U3D_GRID%FACE_AREA) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%CELL_FACES_PG)) THEN
+         ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+         ERROR_MESSAGE = '3D periodic pairing requires a loaded unstructured tetrahedral boundary map.'
+         RETURN
+      END IF
+
+      IF (BOOL_X_PERIODIC .OR. BOOL_Y_PERIODIC .OR. BOOL_Z_PERIODIC .OR. ANY(BOOL_PERIODIC)) THEN
+         ERROR_CODE = PERIODIC_MAP_GROUP_CONFLICT
+         ERROR_MESSAGE = 'Domain_periodicity cannot be combined with 3D unstructured periodic face groups.'
+         RETURN
+      END IF
+
+      IF (U3D_GRID%NUM_NODES < 1 .OR. U3D_GRID%NUM_CELLS < 1 .OR. N_GRID_BC < 1) THEN
+         ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+         ERROR_MESSAGE = '3D periodic pairing found an empty mesh or boundary-group table.'
+         RETURN
+      END IF
+
+      EXTENT = MAXVAL(U3D_GRID%NODE_COORDS, DIM=2) - MINVAL(U3D_GRID%NODE_COORDS, DIM=2)
+      L_REF = NORM2(EXTENT)
+      COORDINATE_SCALE = MAX(1.d0, MAXVAL(ABS(U3D_GRID%NODE_COORDS)))
+      ABS_TOL = 64.d0 * EPSILON(1.d0) * COORDINATE_SCALE
+      REL_TOL = 1.d-10
+      TOLERANCE = ABS_TOL + REL_TOL * L_REF
+      IF (.NOT. IEEE_IS_FINITE(L_REF) .OR. L_REF <= 0.d0 .OR. &
+          .NOT. IEEE_IS_FINITE(TOLERANCE) .OR. TOLERANCE <= 0.d0) THEN
+         ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+         ERROR_MESSAGE = '3D periodic pairing could not derive a finite mesh-scale tolerance.'
+         RETURN
+      END IF
+      IF (PRESENT(MATCH_TOLERANCE_USED)) MATCH_TOLERANCE_USED = TOLERANCE
+
+      ALLOCATE(IS_MASTER_GROUP(N_GRID_BC), IS_SLAVE_GROUP(N_GRID_BC))
+      IS_MASTER_GROUP = .FALSE.
+      IS_SLAVE_GROUP = .FALSE.
+      DO IPG = 1, N_GRID_BC
+         IS_MASTER_GROUP(IPG) = ANY(GRID_BC(IPG)%PARTICLE_BC == PERIODIC_MASTER)
+      END DO
+      IF (.NOT. ANY(IS_MASTER_GROUP)) RETURN
+
+      IF (ALLOCATED(U3D_GRID%PERIODIC_PARTNER_CELL)) DEALLOCATE(U3D_GRID%PERIODIC_PARTNER_CELL)
+      IF (ALLOCATED(U3D_GRID%PERIODIC_PARTNER_FACE)) DEALLOCATE(U3D_GRID%PERIODIC_PARTNER_FACE)
+      IF (ALLOCATED(U3D_GRID%PERIODIC_PARTNER_GROUP)) DEALLOCATE(U3D_GRID%PERIODIC_PARTNER_GROUP)
+      IF (ALLOCATED(U3D_GRID%PERIODIC_VERTEX_PERM)) DEALLOCATE(U3D_GRID%PERIODIC_VERTEX_PERM)
+      IF (ALLOCATED(U3D_GRID%PERIODIC_TRANSLATION)) DEALLOCATE(U3D_GRID%PERIODIC_TRANSLATION)
+      ALLOCATE(U3D_GRID%PERIODIC_PARTNER_CELL(4,U3D_GRID%NUM_CELLS))
+      ALLOCATE(U3D_GRID%PERIODIC_PARTNER_FACE(4,U3D_GRID%NUM_CELLS))
+      ALLOCATE(U3D_GRID%PERIODIC_PARTNER_GROUP(4,U3D_GRID%NUM_CELLS))
+      ALLOCATE(U3D_GRID%PERIODIC_VERTEX_PERM(3,4,U3D_GRID%NUM_CELLS))
+      ALLOCATE(U3D_GRID%PERIODIC_TRANSLATION(3,4,U3D_GRID%NUM_CELLS))
+      U3D_GRID%PERIODIC_PARTNER_CELL = -1
+      U3D_GRID%PERIODIC_PARTNER_FACE = -1
+      U3D_GRID%PERIODIC_PARTNER_GROUP = -1
+      U3D_GRID%PERIODIC_VERTEX_PERM = 0
+      U3D_GRID%PERIODIC_TRANSLATION = 0.d0
+
+      N_BOUNDARY_FACES = COUNT(U3D_GRID%CELL_FACES_PG > 0)
+      IF (N_BOUNDARY_FACES == 0) THEN
+         ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+         ERROR_MESSAGE = '3D periodic pairing found no tagged boundary triangles.'
+         RETURN
+      END IF
+      ALLOCATE(CANDIDATE_CELLS(N_BOUNDARY_FACES), CANDIDATE_FACES(N_BOUNDARY_FACES))
+      ALLOCATE(CANDIDATE_GROUPS(N_BOUNDARY_FACES), CANDIDATE_ORDER(N_BOUNDARY_FACES))
+      ALLOCATE(CANDIDATE_AXIS_COORDS(N_BOUNDARY_FACES))
+      ALLOCATE(USED_PARTNER_FACE(4,U3D_GRID%NUM_CELLS))
+      USED_PARTNER_FACE = .FALSE.
+
+      DO IPG = 1, N_GRID_BC
+         IF (.NOT. IS_MASTER_GROUP(IPG)) CYCLE
+
+         IF (.NOT. ALL(GRID_BC(IPG)%PARTICLE_BC == PERIODIC_MASTER) .OR. &
+             GRID_BC(IPG)%FIELD_BC /= PERIODIC_MASTER_BC) THEN
+            ERROR_CODE = PERIODIC_MAP_INVALID_BOUNDARY
+            WRITE(ERROR_MESSAGE,'(A,A,A)') 'Periodic master group has inconsistent particle/field BCs: ', &
+                                           TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), '.'
+            RETURN
+         END IF
+
+         TRANSLATION = GRID_BC(IPG)%TRANSLATEVEC
+         IF (.NOT. ALL(IEEE_IS_FINITE(TRANSLATION)) .OR. NORM2(TRANSLATION) <= TOLERANCE) THEN
+            ERROR_CODE = PERIODIC_MAP_BAD_TRANSLATION
+            WRITE(ERROR_MESSAGE,'(A,A,A)') 'Periodic master group has a zero or non-finite translation: ', &
+                                           TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), '.'
+            RETURN
+         END IF
+
+         MASTER_FACE_COUNT = COUNT(U3D_GRID%CELL_FACES_PG == IPG)
+         IF (MASTER_FACE_COUNT == 0) THEN
+            ERROR_CODE = PERIODIC_MAP_INVALID_BOUNDARY
+            WRITE(ERROR_MESSAGE,'(A,A,A)') 'Periodic master group has no mapped faces: ', &
+                                           TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), '.'
+            RETURN
+         END IF
+
+         AXIS = MAXLOC(ABS(TRANSLATION), DIM=1)
+         N_CANDIDATES = 0
+         DO IC = 1, U3D_GRID%NUM_CELLS
+            DO IFACE = 1, 4
+               PG = U3D_GRID%CELL_FACES_PG(IFACE,IC)
+               IF (PG <= 0) CYCLE
+               IF (PG > N_GRID_BC) THEN
+                  ERROR_CODE = PERIODIC_MAP_INVALID_GRID
+                  ERROR_MESSAGE = '3D boundary-face map references a physical group outside GRID_BC.'
+                  RETURN
+               END IF
+               IF (IS_MASTER_GROUP(PG)) CYCLE
+               N_CANDIDATES = N_CANDIDATES + 1
+               CANDIDATE_CELLS(N_CANDIDATES) = IC
+               CANDIDATE_FACES(N_CANDIDATES) = IFACE
+               CANDIDATE_GROUPS(N_CANDIDATES) = PG
+               CANDIDATE_CENTROID = SUM(U3D_GRID%NODE_COORDS(:, &
+                  U3D_GRID%FACE_NODES(:,IFACE,IC)), DIM=2) / 3.d0
+               CANDIDATE_AXIS_COORDS(N_CANDIDATES) = CANDIDATE_CENTROID(AXIS)
+               CANDIDATE_ORDER(N_CANDIDATES) = N_CANDIDATES
+            END DO
+         END DO
+
+         IF (N_CANDIDATES > 1) CALL SORT_PERIODIC_CANDIDATES(CANDIDATE_AXIS_COORDS, &
+                                                              CANDIDATE_ORDER, 1, N_CANDIDATES)
+         SLAVE_GROUP = -1
+
+         DO MASTER_CELL = 1, U3D_GRID%NUM_CELLS
+            DO MASTER_FACE = 1, 4
+               IF (U3D_GRID%CELL_FACES_PG(MASTER_FACE,MASTER_CELL) /= IPG) CYCLE
+
+               MASTER_COORDS = U3D_GRID%NODE_COORDS(:, &
+                  U3D_GRID%FACE_NODES(:,MASTER_FACE,MASTER_CELL))
+               MASTER_CENTROID = SUM(MASTER_COORDS, DIM=2) / 3.d0
+               EXPECTED_CENTROID_AXIS = MASTER_CENTROID(AXIS) + TRANSLATION(AXIS)
+               LOWER = 1
+               UPPER = N_CANDIDATES + 1
+               DO WHILE (LOWER < UPPER)
+                  MIDPOINT = (LOWER + UPPER) / 2
+                  IF (MIDPOINT <= N_CANDIDATES) THEN
+                     IF (CANDIDATE_AXIS_COORDS(CANDIDATE_ORDER(MIDPOINT)) < &
+                         EXPECTED_CENTROID_AXIS - TOLERANCE) THEN
+                        LOWER = MIDPOINT + 1
+                     ELSE
+                        UPPER = MIDPOINT
+                     END IF
+                  ELSE
+                     UPPER = MIDPOINT
+                  END IF
+               END DO
+
+               MATCH_COUNT = 0
+               MATCHED_CELL = -1
+               MATCHED_FACE = -1
+               MATCHED_GROUP = -1
+               MATCHED_PERMUTATION = 0
+               DO I = LOWER, N_CANDIDATES
+                  CANDIDATE_INDEX = CANDIDATE_ORDER(I)
+                  IF (CANDIDATE_AXIS_COORDS(CANDIDATE_INDEX) > &
+                      EXPECTED_CENTROID_AXIS + TOLERANCE) EXIT
+
+                  CANDIDATE_CELL = CANDIDATE_CELLS(CANDIDATE_INDEX)
+                  CANDIDATE_FACE = CANDIDATE_FACES(CANDIDATE_INDEX)
+                  CANDIDATE_GROUP = CANDIDATE_GROUPS(CANDIDATE_INDEX)
+                  CANDIDATE_COORDS = U3D_GRID%NODE_COORDS(:, &
+                     U3D_GRID%FACE_NODES(:,CANDIDATE_FACE,CANDIDATE_CELL))
+                  CANDIDATE_CENTROID = SUM(CANDIDATE_COORDS, DIM=2) / 3.d0
+                  IF (NORM2(CANDIDATE_CENTROID - MASTER_CENTROID - TRANSLATION) > TOLERANCE) CYCLE
+
+                  CALL MATCH_PERIODIC_TRIANGLE(MASTER_COORDS, CANDIDATE_COORDS, TRANSLATION, &
+                                               TOLERANCE, VERTEX_PERMUTATION, GEOMETRY_STATUS)
+                  IF (GEOMETRY_STATUS == PERIODIC_MESH_NO_MATCH) CYCLE
+                  IF (GEOMETRY_STATUS == PERIODIC_MESH_AMBIGUOUS) THEN
+                     ERROR_CODE = PERIODIC_MAP_AMBIGUOUS
+                     WRITE(ERROR_MESSAGE,'(A,A,A,I0,A,I0,A)') 'Ambiguous vertices on candidate periodic face for group ', &
+                        TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', cell=', CANDIDATE_CELL, ', face=', CANDIDATE_FACE, '.'
+                     RETURN
+                  ELSE IF (GEOMETRY_STATUS /= PERIODIC_MESH_OK) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_GEOMETRY
+                     ERROR_MESSAGE = 'Invalid coordinates or tolerance while matching periodic triangles.'
+                     RETURN
+                  END IF
+
+                  CANDIDATE_NORMAL = U3D_GRID%FACE_NORMAL(:,CANDIDATE_FACE,CANDIDATE_CELL)
+                  MASTER_NORMAL = U3D_GRID%FACE_NORMAL(:,MASTER_FACE,MASTER_CELL)
+                  IF (.NOT. IEEE_IS_FINITE(U3D_GRID%FACE_AREA(MASTER_FACE,MASTER_CELL)) .OR. &
+                      .NOT. IEEE_IS_FINITE(U3D_GRID%FACE_AREA(CANDIDATE_FACE,CANDIDATE_CELL)) .OR. &
+                      U3D_GRID%FACE_AREA(MASTER_FACE,MASTER_CELL) <= 0.d0 .OR. &
+                      U3D_GRID%FACE_AREA(CANDIDATE_FACE,CANDIDATE_CELL) <= 0.d0) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_GEOMETRY
+                     ERROR_MESSAGE = 'Periodic face has a non-finite or non-positive area.'
+                     RETURN
+                  END IF
+                  AREA_TOLERANCE = ABS_TOL * L_REF + REL_TOL * MAX( &
+                     U3D_GRID%FACE_AREA(MASTER_FACE,MASTER_CELL), &
+                     U3D_GRID%FACE_AREA(CANDIDATE_FACE,CANDIDATE_CELL))
+                  IF (ABS(U3D_GRID%FACE_AREA(MASTER_FACE,MASTER_CELL) - &
+                          U3D_GRID%FACE_AREA(CANDIDATE_FACE,CANDIDATE_CELL)) > AREA_TOLERANCE) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_GEOMETRY
+                     WRITE(ERROR_MESSAGE,'(A,A,A,I0,A,I0,A)') 'Periodic face area mismatch for group ', &
+                        TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', cell=', MASTER_CELL, ', face=', MASTER_FACE, '.'
+                     RETURN
+                  END IF
+
+                  IF (.NOT. ALL(IEEE_IS_FINITE(MASTER_NORMAL)) .OR. &
+                      .NOT. ALL(IEEE_IS_FINITE(CANDIDATE_NORMAL)) .OR. &
+                      NORM2(MASTER_NORMAL) <= 0.d0 .OR. NORM2(CANDIDATE_NORMAL) <= 0.d0) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_GEOMETRY
+                     ERROR_MESSAGE = 'Periodic face has an invalid outward normal.'
+                     RETURN
+                  END IF
+                  NORMALIZED_MASTER = MASTER_NORMAL / NORM2(MASTER_NORMAL)
+                  NORMALIZED_CANDIDATE = CANDIDATE_NORMAL / NORM2(CANDIDATE_NORMAL)
+                  IF (DOT_PRODUCT(NORMALIZED_MASTER,NORMALIZED_CANDIDATE) > -1.d0 + 1.d-8) THEN
+                     ERROR_CODE = PERIODIC_MAP_BAD_GEOMETRY
+                     WRITE(ERROR_MESSAGE,'(A,A,A,I0,A,I0,A)') 'Periodic face normals are not opposite for group ', &
+                        TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', cell=', MASTER_CELL, ', face=', MASTER_FACE, '.'
+                     RETURN
+                  END IF
+
+                  MATCH_COUNT = MATCH_COUNT + 1
+                  MATCHED_CELL = CANDIDATE_CELL
+                  MATCHED_FACE = CANDIDATE_FACE
+                  MATCHED_GROUP = CANDIDATE_GROUP
+                  MATCHED_PERMUTATION = VERTEX_PERMUTATION
+                  IF (MATCH_COUNT > 1) THEN
+                     ERROR_CODE = PERIODIC_MAP_AMBIGUOUS
+                     WRITE(ERROR_MESSAGE,'(A,A,A,I0,A,I0,A)') 'Master face has multiple periodic partners in group ', &
+                        TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', cell=', MASTER_CELL, ', face=', MASTER_FACE, '.'
+                     RETURN
+                  END IF
+               END DO
+
+               IF (MATCH_COUNT == 0) THEN
+                  ERROR_CODE = PERIODIC_MAP_NO_PARTNER
+                  WRITE(ERROR_MESSAGE,'(A,A,A,I0,A,I0,A)') 'No translated partner for periodic group ', &
+                     TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', cell=', MASTER_CELL, ', face=', MASTER_FACE, '.'
+                  RETURN
+               END IF
+
+               IF (SLAVE_GROUP == -1) THEN
+                  SLAVE_GROUP = MATCHED_GROUP
+               ELSE IF (SLAVE_GROUP /= MATCHED_GROUP) THEN
+                  ERROR_CODE = PERIODIC_MAP_GROUP_CONFLICT
+                  WRITE(ERROR_MESSAGE,'(A,A,A)') 'One periodic master group maps to more than one slave group: ', &
+                                                 TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), '.'
+                  RETURN
+               END IF
+
+               IF ((IS_SLAVE_GROUP(MATCHED_GROUP) .AND. SLAVE_GROUP /= MATCHED_GROUP) .OR. &
+                   USED_PARTNER_FACE(MATCHED_FACE,MATCHED_CELL)) THEN
+                  ERROR_CODE = PERIODIC_MAP_AMBIGUOUS
+                  WRITE(ERROR_MESSAGE,'(A,A,A,I0,A,I0,A)') 'Periodic partner face is reused for master group ', &
+                     TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', cell=', MASTER_CELL, ', face=', MASTER_FACE, '.'
+                  RETURN
+               END IF
+
+               IF (.NOT. (ALL(GRID_BC(MATCHED_GROUP)%PARTICLE_BC == VACUUM) .OR. &
+                          ALL(GRID_BC(MATCHED_GROUP)%PARTICLE_BC == PERIODIC_SLAVE)) .OR. &
+                   .NOT. (GRID_BC(MATCHED_GROUP)%FIELD_BC == NO_BC .OR. &
+                          GRID_BC(MATCHED_GROUP)%FIELD_BC == PERIODIC_SLAVE_BC) .OR. &
+                   GRID_BC(MATCHED_GROUP)%REACT) THEN
+                  ERROR_CODE = PERIODIC_MAP_GROUP_CONFLICT
+                  WRITE(ERROR_MESSAGE,'(A,A,A)') 'Geometric periodic partner has a conflicting boundary condition: ', &
+                                                 TRIM(GRID_BC(MATCHED_GROUP)%PHYSICAL_GROUP_NAME), '.'
+                  RETURN
+               END IF
+
+               USED_PARTNER_FACE(MATCHED_FACE,MATCHED_CELL) = .TRUE.
+               IS_SLAVE_GROUP(MATCHED_GROUP) = .TRUE.
+               U3D_GRID%PERIODIC_PARTNER_CELL(MASTER_FACE,MASTER_CELL) = MATCHED_CELL
+               U3D_GRID%PERIODIC_PARTNER_FACE(MASTER_FACE,MASTER_CELL) = MATCHED_FACE
+               U3D_GRID%PERIODIC_PARTNER_GROUP(MASTER_FACE,MASTER_CELL) = MATCHED_GROUP
+               U3D_GRID%PERIODIC_VERTEX_PERM(:,MASTER_FACE,MASTER_CELL) = MATCHED_PERMUTATION
+               U3D_GRID%PERIODIC_TRANSLATION(:,MASTER_FACE,MASTER_CELL) = TRANSLATION
+
+               DO I = 1, 3
+                  REVERSE_PERMUTATION(MATCHED_PERMUTATION(I)) = I
+               END DO
+               U3D_GRID%PERIODIC_PARTNER_CELL(MATCHED_FACE,MATCHED_CELL) = MASTER_CELL
+               U3D_GRID%PERIODIC_PARTNER_FACE(MATCHED_FACE,MATCHED_CELL) = MASTER_FACE
+               U3D_GRID%PERIODIC_PARTNER_GROUP(MATCHED_FACE,MATCHED_CELL) = IPG
+               U3D_GRID%PERIODIC_VERTEX_PERM(:,MATCHED_FACE,MATCHED_CELL) = REVERSE_PERMUTATION
+               U3D_GRID%PERIODIC_TRANSLATION(:,MATCHED_FACE,MATCHED_CELL) = -TRANSLATION
+               U3D_GRID%NUM_PERIODIC_FACE_PAIRS = U3D_GRID%NUM_PERIODIC_FACE_PAIRS + 1
+            END DO
+         END DO
+
+         SLAVE_FACE_COUNT = COUNT(U3D_GRID%CELL_FACES_PG == SLAVE_GROUP)
+         IF (SLAVE_FACE_COUNT /= MASTER_FACE_COUNT) THEN
+            ERROR_CODE = PERIODIC_MAP_NO_PARTNER
+            WRITE(ERROR_MESSAGE,'(A,A,A,A,A,I0,A,I0)') 'Periodic group face counts differ: master ', &
+               TRIM(GRID_BC(IPG)%PHYSICAL_GROUP_NAME), ', slave ', &
+               TRIM(GRID_BC(SLAVE_GROUP)%PHYSICAL_GROUP_NAME), ', master faces=', MASTER_FACE_COUNT, &
+               ', slave faces=', SLAVE_FACE_COUNT
+            RETURN
+         END IF
+      END DO
+
+      DO IPG = 1, N_GRID_BC
+         IF (.NOT. IS_SLAVE_GROUP(IPG)) CYCLE
+         GRID_BC(IPG)%PARTICLE_BC = PERIODIC_SLAVE
+         GRID_BC(IPG)%FIELD_BC = PERIODIC_SLAVE_BC
+      END DO
+
+   END SUBROUTINE BUILD_PERIODIC_BOUNDARY_FACE_MAP
+
+
+   RECURSIVE SUBROUTINE SORT_PERIODIC_CANDIDATES(KEYS, ORDER, LEFT, RIGHT)
+
+      IMPLICIT NONE
+
+      REAL(KIND=8), DIMENSION(:), INTENT(IN) :: KEYS
+      INTEGER, DIMENSION(:), INTENT(INOUT) :: ORDER
+      INTEGER, INTENT(IN) :: LEFT, RIGHT
+
+      INTEGER :: I, J, TEMP
+      REAL(KIND=8) :: PIVOT
+
+      I = LEFT
+      J = RIGHT
+      PIVOT = KEYS(ORDER((LEFT + RIGHT) / 2))
+      DO WHILE (I <= J)
+         DO WHILE (KEYS(ORDER(I)) < PIVOT)
+            I = I + 1
+         END DO
+         DO WHILE (KEYS(ORDER(J)) > PIVOT)
+            J = J - 1
+         END DO
+         IF (I <= J) THEN
+            TEMP = ORDER(I)
+            ORDER(I) = ORDER(J)
+            ORDER(J) = TEMP
+            I = I + 1
+            J = J - 1
+         END IF
+      END DO
+
+      IF (LEFT < J) CALL SORT_PERIODIC_CANDIDATES(KEYS, ORDER, LEFT, J)
+      IF (I < RIGHT) CALL SORT_PERIODIC_CANDIDATES(KEYS, ORDER, I, RIGHT)
+
+   END SUBROUTINE SORT_PERIODIC_CANDIDATES
+
    ! SUBROUTINE ASSIGN_CELLS_TO_PROCS
 
    !    INTEGER, DIMENSION(:), ALLOCATABLE :: NPC, NPCMOD, NPP
@@ -536,7 +1147,9 @@ MODULE grid_and_partition
 
       INTEGER :: i, IP, JP, JPROC, NP_RECV
 
-      ALLOCATE(sendbuf(NP_PROC)) ! Allocate some space for the send buffer (max NP_PROC particles will be exchanged)
+      ! Keep a valid base address even on ranks with zero particles.  MPI
+      ! implementations may still inspect buffer arguments for zero counts.
+      ALLOCATE(sendbuf(MAX(1,NP_PROC))) ! At most NP_PROC particles are exchanged.
 
       ALLOCATE(sendcount(N_MPI_THREADS)) ! Allocate other vectors
       ALLOCATE(recvcount(N_MPI_THREADS))
@@ -586,7 +1199,7 @@ MODULE grid_and_partition
       CALL MPI_ALLTOALL(sendcount, 1, MPI_INTEGER, recvcount, 1, MPI_INTEGER, MPI_COMM_WORLD, ierr)
 
       NP_RECV = SUM(recvcount)
-      ALLOCATE(recvbuf(NP_RECV))
+      ALLOCATE(recvbuf(MAX(1,NP_RECV)))
 
       ! Compute position of particle chunks to be sent & received (incremental)
       DO i = 1, N_MPI_THREADS-1

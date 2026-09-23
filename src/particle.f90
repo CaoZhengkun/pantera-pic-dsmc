@@ -23,6 +23,16 @@ MODULE particle
 
 USE mpi_common
 
+   ! Particle provenance is diagnostic metadata only.  It does not enter any
+   ! force, collision or boundary-condition decision.
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_INVALID    = -1
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_UNKNOWN    = 0
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_REGION     = 1
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_PG_PLANE   = 2
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_PG_CONE    = 3
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_OTHER      = 4
+   INTEGER, PARAMETER :: PARTICLE_SOURCE_TAG_COUNT  = 5
+
    ! Define particle type and arrays !!!!!!!!!!!!!!!!!!!!!!!!!!!!
  
    TYPE PARTICLE_DATA_STRUCTURE
@@ -32,6 +42,7 @@ USE mpi_common
       REAL(KIND=8)    :: DTRIM          ! Remaining time for advection
       INTEGER         :: IC             ! Cell index 
       INTEGER         :: S_ID           ! Species ID
+      INTEGER         :: SOURCE_TAG     ! Diagnostic particle-origin tag
       INTEGER(KIND=8) :: ID             ! Particle identifier
       LOGICAL         :: DUMP_TRAJ      ! The trajectory of this particle should be dumped
    END TYPE PARTICLE_DATA_STRUCTURE
@@ -131,6 +142,7 @@ USE mpi_common
  
       particlept%S_ID = S_ID 
       particlept%IC   = IC
+      particlept%SOURCE_TAG = PARTICLE_SOURCE_UNKNOWN
 
       particlept%DTRIM = DTRIM
 
@@ -140,6 +152,72 @@ USE mpi_common
       particlept%DUMP_TRAJ = .FALSE.
       
    END SUBROUTINE INIT_PARTICLE
+
+
+   SUBROUTINE SET_PARTICLE_SOURCE_TAG(PARTICLEPT, SOURCE_TAG)
+
+      IMPLICIT NONE
+
+      TYPE(PARTICLE_DATA_STRUCTURE), INTENT(INOUT) :: PARTICLEPT
+      INTEGER, INTENT(IN) :: SOURCE_TAG
+
+      IF (SOURCE_TAG < PARTICLE_SOURCE_UNKNOWN .OR. SOURCE_TAG > PARTICLE_SOURCE_OTHER) THEN
+         PARTICLEPT%SOURCE_TAG = PARTICLE_SOURCE_UNKNOWN
+      ELSE
+         PARTICLEPT%SOURCE_TAG = SOURCE_TAG
+      END IF
+
+   END SUBROUTINE SET_PARTICLE_SOURCE_TAG
+
+
+   CHARACTER(LEN=16) FUNCTION PARTICLE_SOURCE_TAG_NAME(SOURCE_TAG)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: SOURCE_TAG
+
+      SELECT CASE (SOURCE_TAG)
+      CASE (PARTICLE_SOURCE_REGION)
+         PARTICLE_SOURCE_TAG_NAME = 'SOURCE_REGION'
+      CASE (PARTICLE_SOURCE_PG_PLANE)
+         PARTICLE_SOURCE_TAG_NAME = 'PG_PLANE'
+      CASE (PARTICLE_SOURCE_PG_CONE)
+         PARTICLE_SOURCE_TAG_NAME = 'PG_CONE'
+      CASE (PARTICLE_SOURCE_OTHER)
+         PARTICLE_SOURCE_TAG_NAME = 'OTHER'
+      CASE (PARTICLE_SOURCE_UNKNOWN)
+         PARTICLE_SOURCE_TAG_NAME = 'UNKNOWN'
+      CASE DEFAULT
+         PARTICLE_SOURCE_TAG_NAME = 'INVALID'
+      END SELECT
+
+   END FUNCTION PARTICLE_SOURCE_TAG_NAME
+
+
+   INTEGER FUNCTION PARTICLE_SOURCE_TAG_FROM_NAME(NAME)
+
+      IMPLICIT NONE
+
+      CHARACTER(LEN=*), INTENT(IN) :: NAME
+      CHARACTER(LEN=32) :: NORMALIZED_NAME
+
+      NORMALIZED_NAME = ADJUSTL(TRIM(NAME))
+      SELECT CASE (NORMALIZED_NAME)
+      CASE ('SOURCE_REGION')
+         PARTICLE_SOURCE_TAG_FROM_NAME = PARTICLE_SOURCE_REGION
+      CASE ('PG_PLANE')
+         PARTICLE_SOURCE_TAG_FROM_NAME = PARTICLE_SOURCE_PG_PLANE
+      CASE ('PG_CONE')
+         PARTICLE_SOURCE_TAG_FROM_NAME = PARTICLE_SOURCE_PG_CONE
+      CASE ('OTHER')
+         PARTICLE_SOURCE_TAG_FROM_NAME = PARTICLE_SOURCE_OTHER
+      CASE ('UNKNOWN')
+         PARTICLE_SOURCE_TAG_FROM_NAME = PARTICLE_SOURCE_UNKNOWN
+      CASE DEFAULT
+         PARTICLE_SOURCE_TAG_FROM_NAME = PARTICLE_SOURCE_INVALID
+      END SELECT
+
+   END FUNCTION PARTICLE_SOURCE_TAG_FROM_NAME
 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! SUBROUTINE ADD_PARTICLE_ARRAY -> adds a particle to "particles" array     !!!
@@ -192,6 +270,14 @@ USE mpi_common
       ELSE
          NP = NP + 1 ! Increase number of particles in array
          IF (.NOT. ALLOCATED(particlesARRAY)) ALLOCATE(particlesARRAY(1))
+         IF (SIZE(particlesARRAY) == 0) THEN
+            ! A rank with no local particles may still own an allocated
+            ! zero-length array.  Receiving the first migrated particle must
+            ! turn that storage into a valid one-element array before the
+            ! assignment below.
+            DEALLOCATE(particlesARRAY)
+            ALLOCATE(particlesARRAY(1))
+         END IF
          particlesARRAY(1) = particleNOW
       END IF
 
@@ -232,6 +318,7 @@ USE mpi_common
       particlesARRAY(NP_ARRAY)%VY = 0.d0
       particlesARRAY(NP_ARRAY)%VZ = 0.d0
       particlesARRAY(NP_ARRAY)%S_ID = -1
+      particlesARRAY(NP_ARRAY)%SOURCE_TAG = PARTICLE_SOURCE_UNKNOWN
       particlesARRAY(NP_ARRAY)%ID = -1
       particlesARRAY(NP_ARRAY)%DUMP_TRAJ = .FALSE.
       

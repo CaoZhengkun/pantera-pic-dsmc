@@ -26,6 +26,10 @@ MODULE timecycle
    USE postprocess
    USE fields
    USE washboard
+   USE grid_and_partition, ONLY: CELL_FROM_POSITION
+   USE surface_emission_utils, ONLY: SEEM_OK, SEEM_OUT_OF_RANGE, &
+      accumulate_surface_emission, interpolate_see_yield, sample_poisson_count, compute_see_macro_mean, &
+      compute_kinetic_energy_ev
 
    CONTAINS
 
@@ -42,6 +46,7 @@ MODULE timecycle
       REAL(KIND=8) :: CURRENT_TIME, CURRENT_CPU_TIME, EST_TIME
       INTEGER :: EST_TIME_H, EST_TIME_M
       INTEGER :: IOS_LOG
+      INTEGER :: SOURCE_COUNTS_LOCAL(4), SOURCE_COUNTS_TOTAL(4)
 
       CHARACTER(len=512) :: stringTMP
       CHARACTER(LEN=512) :: STATS_LOG_FILENAME
@@ -101,6 +106,7 @@ MODULE timecycle
          IF (MOD(tID-DUMP_BOUND_START, DUMP_BOUND_AVG_EVERY*DUMP_BOUND_N_AVG) .EQ. 0) THEN
             CALL BOUNDARY_GATHER
             CALL BOUNDARY_SAVE
+            CALL SURFACE_EMISSION_SAVE
             CALL BOUNDARY_RESET
          END IF
       END IF
@@ -189,6 +195,10 @@ MODULE timecycle
             CALL MPI_REDUCE(TIMESTEP_COLL, NCOLL_TOT, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
             CALL MPI_REDUCE(TIMESTEP_REAC, NREAC_TOT, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
             CALL MPI_REDUCE(FIELD_POWER, FIELD_POWER_TOT, 1, MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+            SOURCE_COUNTS_LOCAL = [SOURCE_THERMALIZED_COUNT, SOURCE_LOSS_COUNT, &
+                                   SOURCE_REINJECTED_COUNT, SOURCE_FLUX_INJECTED_COUNT]
+            CALL MPI_REDUCE(SOURCE_COUNTS_LOCAL, SOURCE_COUNTS_TOTAL, 4, MPI_INTEGER, MPI_SUM, 0, &
+                            MPI_COMM_WORLD, ierr)
 
             
 
@@ -218,6 +228,22 @@ MODULE timecycle
                CALL FLUSH(STATS_LOG_UNIT)
             END IF
 
+            IF (BOOL_SOURCE_THERMALIZATION .OR. SOURCE_REINJECTION_MODE /= SOURCE_REINJECT_NONE .OR. &
+                BOOL_SOURCE_CONSTANT_FLUX) THEN
+               IF (PROC_ID == 0) THEN
+                  WRITE(stringTMP,'(A,I12,A,I12,A,I12,A,I12)') &
+                     '   Source totals: thermalized=', SOURCE_COUNTS_TOTAL(1), &
+                     ' loss_events=', SOURCE_COUNTS_TOTAL(2), &
+                     ' reinjected_particles=', SOURCE_COUNTS_TOTAL(3), &
+                     ' constant_flux_particles=', SOURCE_COUNTS_TOTAL(4)
+                  CALL ONLYMASTERPRINT1(PROC_ID, TRIM(stringTMP))
+                  IF (STATS_LOG_UNIT /= 0) THEN
+                     WRITE(STATS_LOG_UNIT,'(A)') TRIM(stringTMP)
+                     CALL FLUSH(STATS_LOG_UNIT)
+                  END IF
+               END IF
+            END IF
+
          END IF
 
 
@@ -232,7 +258,9 @@ MODULE timecycle
          CALL BOUNDARIES_INJECT
          CALL LINE_SOURCE_INJECT
          CALL BOUNDARIES_EMIT
+         CALL BOUNDARY_CURRENT_DENSITY_EMIT
          CALL VOLUME_INJECT
+         CALL SOURCE_CONSTANT_FLUX_INJECT
 
 
          ! ########### Perform load balancing ###################################
@@ -355,10 +383,14 @@ MODULE timecycle
          CALL TIMER_STOP(6)
 
          IF (BOOL_THERMAL_BATH) CALL THERMAL_BATH
+         CALL THERMALIZE_SOURCE_REGION
 
          ! Remove background particles created by MCC immediately,
          ! before they pollute grid averaging and conservation checks.
          IF (REMOVE_MIX .NE. -1) CALL REMOVE_PARTICLES_IN_MIXTURE(REMOVE_MIX)
+
+         IF (N_SURFACE_CURRENT_EMIT_TASKS > 0 .OR. N_SECONDARY_EMISSION_MODELS > 0) &
+            SURFACE_DIAGNOSTIC_WINDOW_STEPS = SURFACE_DIAGNOSTIC_WINDOW_STEPS + 1
 
          CALL TIMER_START(4)
          ! ########### Dump particles ##############################################
@@ -385,6 +417,7 @@ MODULE timecycle
             IF (MOD(tID-DUMP_BOUND_START, DUMP_BOUND_AVG_EVERY*DUMP_BOUND_N_AVG) .EQ. 0) THEN
                CALL BOUNDARY_GATHER
                CALL BOUNDARY_SAVE
+               CALL SURFACE_EMISSION_SAVE
                CALL BOUNDARY_RESET
             ! If we are just in a grid average timestep, compute the grid average
             ELSE IF (MOD(tID-DUMP_BOUND_START, DUMP_BOUND_AVG_EVERY) .EQ. 0) THEN
@@ -411,7 +444,6 @@ MODULE timecycle
 
          ! ~~~~~ Hmm that's it! ~~~~~
 
-         
          tID = tID + 1
 
       END DO
@@ -606,6 +638,7 @@ MODULE timecycle
 
                ! Init a particle object and assign it to the local vector of particles
                CALL INIT_PARTICLE(X,Y,Z,VX,VY,VZ,EROT,EVIB,S_ID,IC,DTFRAC,  particleNOW)
+               CALL SET_PARTICLE_SOURCE_TAG(particleNOW, PARTICLE_SOURCE_TAG_FOR_GROUP(FACE_PG))
                CALL ADD_PARTICLE_ARRAY(particleNOW, NP_PROC, particles)
 
                ! Save emitted particle on boundary going OUT
@@ -704,6 +737,391 @@ MODULE timecycle
 
    END SUBROUTINE BOUNDARIES_EMIT
 
+
+   SUBROUTINE BOUNDARY_CURRENT_DENSITY_EMIT
+
+      IMPLICIT NONE
+
+      INTEGER :: ITASK, IC, IFACE, S_ID, FACE_PG, N_EMIT, IP, IERR_SURFACE
+      INTEGER :: IV1, IV2, VP, VMN
+      REAL(KIND=8) :: MACRO_WEIGHT, RESIDUAL_NEXT, MASS, V_DUMMY, V_NORMAL, V_TANG1, V_TANG2
+      REAL(KIND=8) :: X, Y, Z, X1, X2, Y1, Y2, VX, VY, VZ, EROT, EVIB, DT_REMAIN
+      REAL(KIND=8) :: R, P, Q, S, T
+      REAL(KIND=8), DIMENSION(3) :: FACE_NORMAL, FACE_TANG1, FACE_TANG2, V1, V2, V3
+      CHARACTER(LEN=256) :: ERROR_MESSAGE
+      TYPE(PARTICLE_DATA_STRUCTURE) :: PARTICLE_NOW
+
+      IF (N_SURFACE_CURRENT_EMIT_TASKS <= 0) RETURN
+      IF (.NOT. ALLOCATED(CELL_PROCS)) THEN
+         CALL ERROR_ABORT('Boundary_current_density_emit requires initialized cell ownership.')
+         RETURN
+      END IF
+
+      DO ITASK = 1, N_SURFACE_CURRENT_EMIT_TASKS
+         IC = SURFACE_CURRENT_EMIT_TASKS(ITASK)%IC
+         IFACE = SURFACE_CURRENT_EMIT_TASKS(ITASK)%IFACE
+         S_ID = SURFACE_CURRENT_EMIT_TASKS(ITASK)%SPECIES_ID
+         IF (BOOL_RADIAL_WEIGHTING) THEN
+            IF (.NOT. ALLOCATED(CELL_FNUM)) THEN
+               CALL ERROR_ABORT('Fixed current-density source has no cell-local radial macro weight.')
+               RETURN
+            END IF
+            IF (IC < 1 .OR. IC > SIZE(CELL_FNUM)) THEN
+               CALL ERROR_ABORT('Fixed current-density source face cell has no radial macro weight.')
+               RETURN
+            END IF
+            MACRO_WEIGHT = CELL_FNUM(IC) * SPECIES(S_ID)%SPWT
+         ELSE
+            MACRO_WEIGHT = FNUM * SPECIES(S_ID)%SPWT
+         END IF
+
+         ! Every rank updates the replicated per-face remainder; only the cell
+         ! owner creates particles. This keeps the fraction stable if ownership
+         ! changes after a load-balance operation.
+         CALL ACCUMULATE_SURFACE_EMISSION(SURFACE_CURRENT_EMIT_TASKS(ITASK)%CURRENT_DENSITY, &
+              SURFACE_CURRENT_EMIT_TASKS(ITASK)%FACE_AREA, DT, QE, SPECIES(S_ID)%CHARGE, &
+              MACRO_WEIGHT, SURFACE_CURRENT_EMIT_TASKS(ITASK)%FRACTIONAL_RESIDUAL, &
+              N_EMIT, RESIDUAL_NEXT, IERR_SURFACE)
+         IF (IERR_SURFACE /= SEEM_OK) THEN
+            WRITE(ERROR_MESSAGE,'(A,I0,A,I0)') 'Invalid fixed-current emission parameters at face ', &
+                 IFACE, ' in cell ', IC
+            CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+            RETURN
+         END IF
+         SURFACE_CURRENT_EMIT_TASKS(ITASK)%FRACTIONAL_RESIDUAL = RESIDUAL_NEXT
+         IF (N_EMIT <= 0) CYCLE
+         IF (CELL_PROCS(IC) /= PROC_ID) CYCLE
+
+         FACE_PG = SURFACE_CURRENT_EMIT_TASKS(ITASK)%PHYSICAL_GROUP
+         IF (DIMS == 1) THEN
+            FACE_NORMAL = U1D_GRID%EDGE_NORMAL(:,IFACE,IC)
+            FACE_TANG1 = [0.d0, FACE_NORMAL(1), 0.d0]
+            FACE_TANG2 = [0.d0, 0.d0, 1.d0]
+            IV1 = U1D_GRID%CELL_NODES(IFACE,IC)
+            X1 = U1D_GRID%NODE_COORDS(1,IV1)
+         ELSE IF (DIMS == 2) THEN
+            FACE_NORMAL = U2D_GRID%EDGE_NORMAL(:,IFACE,IC)
+            FACE_TANG1 = [-FACE_NORMAL(2), FACE_NORMAL(1), 0.d0]
+            FACE_TANG2 = [0.d0, 0.d0, 1.d0]
+            SELECT CASE (IFACE)
+            CASE (1)
+               IV1 = U2D_GRID%CELL_NODES(1,IC)
+               IV2 = U2D_GRID%CELL_NODES(2,IC)
+            CASE (2)
+               IV1 = U2D_GRID%CELL_NODES(2,IC)
+               IV2 = U2D_GRID%CELL_NODES(3,IC)
+            CASE DEFAULT
+               IV1 = U2D_GRID%CELL_NODES(3,IC)
+               IV2 = U2D_GRID%CELL_NODES(1,IC)
+            END SELECT
+            X1 = U2D_GRID%NODE_COORDS(1,IV1)
+            Y1 = U2D_GRID%NODE_COORDS(2,IV1)
+            X2 = U2D_GRID%NODE_COORDS(1,IV2)
+            Y2 = U2D_GRID%NODE_COORDS(2,IV2)
+         ELSE IF (DIMS == 3) THEN
+            FACE_NORMAL = U3D_GRID%FACE_NORMAL(:,IFACE,IC)
+            FACE_TANG1 = U3D_GRID%FACE_TANG1(:,IFACE,IC)
+            FACE_TANG2 = U3D_GRID%FACE_TANG2(:,IFACE,IC)
+            V1 = U3D_GRID%NODE_COORDS(:,U3D_GRID%FACE_NODES(1,IFACE,IC))
+            V2 = U3D_GRID%NODE_COORDS(:,U3D_GRID%FACE_NODES(2,IFACE,IC))
+            V3 = U3D_GRID%NODE_COORDS(:,U3D_GRID%FACE_NODES(3,IFACE,IC))
+         ELSE
+            CALL ERROR_ABORT('Boundary_current_density_emit encountered an unsupported dimension.')
+            RETURN
+         END IF
+
+         MASS = SPECIES(S_ID)%MOLECULAR_MASS
+         SURFACE_CURRENT_EMIT_TASKS(ITASK)%MACRO_COUNT_WINDOW = &
+              SURFACE_CURRENT_EMIT_TASKS(ITASK)%MACRO_COUNT_WINDOW + INT(N_EMIT, KIND=8)
+         SURFACE_CURRENT_EMIT_TASKS(ITASK)%CHARGE_WINDOW = &
+              SURFACE_CURRENT_EMIT_TASKS(ITASK)%CHARGE_WINDOW + REAL(N_EMIT, KIND=8) * &
+              QE * SPECIES(S_ID)%CHARGE * MACRO_WEIGHT
+
+         DO IP = 1, N_EMIT
+            CALL SURFACE_CURRENT_EMIT_TASKS(ITASK)%VDF%SAMPLE_VELOCITY(0.d0, 0.d0, 0.d0, &
+                 SURFACE_CURRENT_EMIT_TASKS(ITASK)%TEMPERATURE, &
+                 SURFACE_CURRENT_EMIT_TASKS(ITASK)%TEMPERATURE, &
+                 SURFACE_CURRENT_EMIT_TASKS(ITASK)%TEMPERATURE, V_DUMMY, V_TANG1, V_TANG2, MASS)
+            V_NORMAL = ABS(SURFACE_CURRENT_EMIT_TASKS(ITASK)%VDF%SAMPLE_NORMAL( &
+                 0.d0, SURFACE_CURRENT_EMIT_TASKS(ITASK)%TEMPERATURE, MASS))
+
+            VX = -V_NORMAL*FACE_NORMAL(1) - V_TANG1*FACE_TANG1(1) - V_TANG2*FACE_TANG2(1)
+            VY = -V_NORMAL*FACE_NORMAL(2) - V_TANG1*FACE_TANG1(2) - V_TANG2*FACE_TANG2(2)
+            VZ = -V_NORMAL*FACE_NORMAL(3) - V_TANG1*FACE_TANG1(3) - V_TANG2*FACE_TANG2(3)
+            CALL INTERNAL_ENERGY(SPECIES(S_ID)%ROTDOF, SURFACE_CURRENT_EMIT_TASKS(ITASK)%TEMPERATURE, EROT)
+            CALL INTERNAL_ENERGY(SPECIES(S_ID)%VIBDOF, SURFACE_CURRENT_EMIT_TASKS(ITASK)%TEMPERATURE, EVIB)
+
+            IF (DIMS == 1) THEN
+               X = X1
+               Y = YMIN + (YMAX-YMIN)*rf()
+               Z = ZMIN + (ZMAX-ZMIN)*rf()
+            ELSE IF (DIMS == 2) THEN
+               R = rf()
+               IF (AXI) THEN
+                  IF (Y1 == Y2) THEN
+                     Y = Y1
+                     X = X1 + R*(X2-X1)
+                  ELSE IF (Y1 < Y2) THEN
+                     Y = SQRT(Y1*Y1 + R*(Y2*Y2-Y1*Y1))
+                     X = X1 + (Y-Y1)/(Y2-Y1)*(X2-X1)
+                  ELSE
+                     Y = SQRT(Y2*Y2 + R*(Y1*Y1-Y2*Y2))
+                     X = X2 + (Y-Y2)/(Y1-Y2)*(X1-X2)
+                  END IF
+                  Z = 0.d0
+               ELSE
+                  X = X1 + R*(X2-X1)
+                  Y = Y1 + R*(Y2-Y1)
+                  Z = ZMIN + (ZMAX-ZMIN)*rf()
+               END IF
+            ELSE
+               S = rf()
+               T = rf()
+               IF (S > 1.d0-T) THEN
+                  Q = 1.d0-T
+                  P = 1.d0-S
+               ELSE
+                  Q = T
+                  P = S
+               END IF
+               X = V1(1) + (V2(1)-V1(1))*P + (V3(1)-V1(1))*Q
+               Y = V1(2) + (V2(2)-V1(2))*P + (V3(2)-V1(2))*Q
+               Z = V1(3) + (V2(3)-V1(3))*P + (V3(3)-V1(3))*Q
+            END IF
+
+            DT_REMAIN = rf()*DT
+         CALL INIT_PARTICLE(X, Y, Z, VX, VY, VZ, EROT, EVIB, S_ID, IC, DT_REMAIN, PARTICLE_NOW)
+         CALL SET_PARTICLE_SOURCE_TAG(PARTICLE_NOW, PARTICLE_SOURCE_TAG_FOR_GROUP(FACE_PG))
+         CALL ADD_PARTICLE_ARRAY(PARTICLE_NOW, NP_PROC, particles)
+
+            IF ((tID .GE. DUMP_GRID_START) .AND. (tID .NE. RESTART_TIMESTEP)) THEN
+               IF (MOD(tID-DUMP_BOUND_START, DUMP_BOUND_AVG_EVERY) .EQ. 0) &
+                  CALL TALLY_PARTICLE_TO_BOUNDARY(.TRUE., PARTICLE_NOW, IC, IFACE)
+            END IF
+            CALL UPDATE_FIXED_SURFACE_EMISSION_ELECTRODE(PARTICLE_NOW, FACE_PG, IC, MACRO_WEIGHT)
+         END DO
+      END DO
+
+   END SUBROUTINE BOUNDARY_CURRENT_DENSITY_EMIT
+
+
+   SUBROUTINE UPDATE_FIXED_SURFACE_EMISSION_ELECTRODE(PARTICLE_NOW, FACE_PG, IC, MACRO_WEIGHT)
+
+      IMPLICIT NONE
+
+      TYPE(PARTICLE_DATA_STRUCTURE), INTENT(IN) :: PARTICLE_NOW
+      INTEGER, INTENT(IN) :: FACE_PG, IC
+      REAL(KIND=8), INTENT(IN) :: MACRO_WEIGHT
+      INTEGER :: I, VP, MASTER_NODE, S_ID
+      REAL(KIND=8) :: CHARGE, K, RHO_Q, PSIP
+
+      S_ID = PARTICLE_NOW%S_ID
+      CHARGE = SPECIES(S_ID)%CHARGE
+
+      IF ((GRID_BC(FACE_PG)%FIELD_BC == DIELECTRIC_BC .OR. &
+           GRID_BC(FACE_PG)%FIELD_BC == THIN_DIELECTRIC_LAYER_BC) .AND. ABS(CHARGE) >= 1.d-6) THEN
+         K = QE/(EPS0*EPS_SCALING**2)
+         IF (DIMS == 1) THEN
+            RHO_Q = K*CHARGE*MACRO_WEIGHT/(YMAX-YMIN)/(ZMAX-ZMIN)
+            DO I = 1, 2
+               VP = U1D_GRID%CELL_NODES(I,IC)
+               PSIP = U1D_GRID%BASIS_COEFFS(1,I,IC)*PARTICLE_NOW%X + U1D_GRID%BASIS_COEFFS(2,I,IC)
+               SURFACE_CHARGE(VP) = SURFACE_CHARGE(VP) - RHO_Q*PSIP
+            END DO
+         ELSE IF (DIMS == 2) THEN
+            RHO_Q = K*CHARGE*MACRO_WEIGHT/(ZMAX-ZMIN)
+            DO I = 1, 3
+               VP = U2D_GRID%CELL_NODES(I,IC)
+               PSIP = U2D_GRID%BASIS_COEFFS(1,I,IC)*PARTICLE_NOW%X + &
+                      U2D_GRID%BASIS_COEFFS(2,I,IC)*PARTICLE_NOW%Y + U2D_GRID%BASIS_COEFFS(3,I,IC)
+               SURFACE_CHARGE(VP) = SURFACE_CHARGE(VP) - RHO_Q*PSIP
+            END DO
+         ELSE IF (DIMS == 3) THEN
+            RHO_Q = K*CHARGE*MACRO_WEIGHT
+            DO I = 1, 4
+               VP = U3D_GRID%CELL_NODES(I,IC)
+               PSIP = U3D_GRID%BASIS_COEFFS(1,I,IC)*PARTICLE_NOW%X + &
+                      U3D_GRID%BASIS_COEFFS(2,I,IC)*PARTICLE_NOW%Y + &
+                      U3D_GRID%BASIS_COEFFS(3,I,IC)*PARTICLE_NOW%Z + U3D_GRID%BASIS_COEFFS(4,I,IC)
+               SURFACE_CHARGE(VP) = SURFACE_CHARGE(VP) - RHO_Q*PSIP
+            END DO
+         END IF
+      ELSE IF (GRID_BC(FACE_PG)%FIELD_BC == SPICE_NODE_BC .AND. ABS(CHARGE) >= 1.d-6) THEN
+         GRID_BC(FACE_PG)%SPICE_NODE_CURRENT = GRID_BC(FACE_PG)%SPICE_NODE_CURRENT - &
+              QE*MACRO_WEIGHT*CHARGE/DT
+      ELSE IF (GRID_BC(FACE_PG)%FIELD_BC == CONDUCTIVE_BC .AND. ABS(CHARGE) >= 1.d-6) THEN
+         K = QE/(EPS0*EPS_SCALING**2)
+         IF (DIMS == 1) THEN
+            RHO_Q = K*CHARGE*MACRO_WEIGHT/(YMAX-YMIN)/(ZMAX-ZMIN)
+         ELSE IF (DIMS == 2) THEN
+            RHO_Q = K*CHARGE*MACRO_WEIGHT/(ZMAX-ZMIN)
+         ELSE
+            RHO_Q = K*CHARGE*MACRO_WEIGHT
+         END IF
+         MASTER_NODE = CONNECTED_COND_SURFACES(GRID_BC(FACE_PG)%CONDUCTIVE_PART_ID)%MASTER_NODE
+         SURFACE_CHARGE(MASTER_NODE) = SURFACE_CHARGE(MASTER_NODE) - RHO_Q
+      END IF
+   END SUBROUTINE UPDATE_FIXED_SURFACE_EMISSION_ELECTRODE
+
+
+   INTEGER FUNCTION FIND_SECONDARY_EMISSION_MODEL(FACE_PG, INCIDENT_SPECIES_ID) RESULT(MODEL_INDEX)
+
+      IMPLICIT NONE
+      INTEGER, INTENT(IN) :: FACE_PG, INCIDENT_SPECIES_ID
+      INTEGER :: I
+
+      MODEL_INDEX = 0
+      IF (.NOT. ALLOCATED(SECONDARY_EMISSION_MODELS)) RETURN
+      DO I = 1, N_SECONDARY_EMISSION_MODELS
+         IF (SECONDARY_EMISSION_MODELS(I)%PHYSICAL_GROUP == FACE_PG .AND. &
+             SECONDARY_EMISSION_MODELS(I)%INCIDENT_SPECIES_ID == INCIDENT_SPECIES_ID) THEN
+            MODEL_INDEX = I
+            RETURN
+         END IF
+      END DO
+   END FUNCTION FIND_SECONDARY_EMISSION_MODEL
+
+
+   SUBROUTINE HANDLE_SECONDARY_EMISSION(IP, IC, IFACE, FACE_PG, FACE_NORMAL, &
+                                        FACE_TANG1, FACE_TANG2, MODEL_INDEX, REMOVE_FLAGS, &
+                                        EVENTS_THIS_STEP, PRODUCTS_THIS_STEP)
+
+      IMPLICIT NONE
+      INTEGER, INTENT(IN) :: IP, IC, IFACE, FACE_PG, MODEL_INDEX
+      REAL(KIND=8), INTENT(IN) :: FACE_NORMAL(3), FACE_TANG1(3), FACE_TANG2(3)
+      LOGICAL, DIMENSION(:), ALLOCATABLE, INTENT(INOUT) :: REMOVE_FLAGS
+      INTEGER, INTENT(INOUT) :: EVENTS_THIS_STEP, PRODUCTS_THIS_STEP
+      TYPE(SURFACE_EVENT_DATA) :: EVENT
+      TYPE(SURFACE_PRODUCT_DATA), DIMENSION(:), ALLOCATABLE :: PRODUCT_BUFFER
+      TYPE(PARTICLE_DATA_STRUCTURE) :: PARTICLE_NOW
+      INTEGER :: INCIDENT_ID, ELECTRON_ID, N_PRODUCTS, IERR_SEE, I
+      REAL(KIND=8) :: INCOMING_WEIGHT, PRODUCT_WEIGHT, INCIDENT_MASS, ELECTRON_MASS
+      REAL(KIND=8) :: INCIDENT_ENERGY_EV, YIELD_VALUE, MEAN_COUNT
+      REAL(KIND=8) :: V_DUMMY, V_NORMAL, V_TANG1, V_TANG2, PRODUCT_TEMPERATURE
+      CHARACTER(LEN=256) :: ERROR_MESSAGE
+
+      IF (GRID_BC(FACE_PG)%PARTICLE_BC(particles(IP)%S_ID) /= VACUUM .OR. GRID_BC(FACE_PG)%REACT) THEN
+         CALL ERROR_ABORT('Secondary_electron_emission only supports non-reactive absorbing boundaries.')
+         RETURN
+      END IF
+      IF (EVENTS_THIS_STEP >= 100000) THEN
+         WRITE(ERROR_MESSAGE,'(A,I0)') 'SEE event safety limit (100000 per rank/timestep) exceeded at face ', IFACE
+         CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+         RETURN
+      END IF
+      EVENTS_THIS_STEP = EVENTS_THIS_STEP + 1
+
+      INCIDENT_ID = particles(IP)%S_ID
+      ELECTRON_ID = SECONDARY_EMISSION_MODELS(MODEL_INDEX)%ELECTRON_SPECIES_ID
+      EVENT%PHYSICAL_GROUP = FACE_PG
+      EVENT%FACE_ID = IFACE
+      EVENT%IC = IC
+      EVENT%INCIDENT_SPECIES_ID = INCIDENT_ID
+      EVENT%INCIDENT_VELOCITY = [particles(IP)%VX, particles(IP)%VY, particles(IP)%VZ]
+      EVENT%INWARD_NORMAL = FACE_NORMAL
+      EVENT%POSITION = [particles(IP)%X, particles(IP)%Y, particles(IP)%Z]
+      EVENT%REMAINING_TIME = MAX(0.d0, particles(IP)%DTRIM)
+
+      INCIDENT_MASS = SPECIES(INCIDENT_ID)%MOLECULAR_MASS
+      CALL COMPUTE_KINETIC_ENERGY_EV(INCIDENT_MASS, EVENT%INCIDENT_VELOCITY, QE, &
+           INCIDENT_ENERGY_EV, IERR_SEE)
+      IF (IERR_SEE /= SEEM_OK) THEN
+         CALL ERROR_ABORT('SEE incident particle has invalid mass or kinetic energy.')
+         RETURN
+      END IF
+      EVENT%INCIDENT_ENERGY_EV = INCIDENT_ENERGY_EV
+      IF (BOOL_RADIAL_WEIGHTING) THEN
+         IF (.NOT. ALLOCATED(CELL_FNUM)) THEN
+            CALL ERROR_ABORT('SEE cannot determine the incident radial macro-particle weight.')
+            RETURN
+         END IF
+         IF (IC < 1 .OR. IC > SIZE(CELL_FNUM)) THEN
+            CALL ERROR_ABORT('SEE incident cell has no valid radial macro-particle weight.')
+            RETURN
+         END IF
+         INCOMING_WEIGHT = CELL_FNUM(IC)*SPECIES(INCIDENT_ID)%SPWT
+         PRODUCT_WEIGHT = CELL_FNUM(IC)*SPECIES(ELECTRON_ID)%SPWT
+      ELSE
+         INCOMING_WEIGHT = FNUM*SPECIES(INCIDENT_ID)%SPWT
+         PRODUCT_WEIGHT = FNUM*SPECIES(ELECTRON_ID)%SPWT
+      END IF
+      EVENT%MACRO_WEIGHT = INCOMING_WEIGHT
+
+      CALL INTERPOLATE_SEE_YIELD(INCIDENT_ENERGY_EV, &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_ENERGY_EV, &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%YIELD_TABLE, YIELD_VALUE, IERR_SEE)
+      IF (IERR_SEE == SEEM_OUT_OF_RANGE) THEN
+         SECONDARY_EMISSION_MODELS(MODEL_INDEX)%OUT_OF_RANGE_COUNT = &
+              SECONDARY_EMISSION_MODELS(MODEL_INDEX)%OUT_OF_RANGE_COUNT + 1_8
+      ELSE IF (IERR_SEE /= SEEM_OK) THEN
+         CALL ERROR_ABORT('SEE yield interpolation failed for an initialized model.')
+         RETURN
+      END IF
+
+      CALL COMPUTE_SEE_MACRO_MEAN(YIELD_VALUE, INCOMING_WEIGHT, PRODUCT_WEIGHT, MEAN_COUNT, IERR_SEE)
+      IF (IERR_SEE /= SEEM_OK) THEN
+         CALL ERROR_ABORT('SEE produced an invalid or overflowing weighted macro-count mean.')
+         RETURN
+      END IF
+      CALL SAMPLE_POISSON_COUNT(MEAN_COUNT, N_PRODUCTS, IERR_SEE)
+      IF (IERR_SEE /= SEEM_OK) THEN
+         CALL ERROR_ABORT('SEE Poisson product count is invalid or exceeds the supported integer range.')
+         RETURN
+      END IF
+      IF (N_PRODUCTS > 100000-PRODUCTS_THIS_STEP) THEN
+         WRITE(ERROR_MESSAGE,'(A,I0)') 'SEE product safety limit (100000 per rank/timestep) exceeded at face ', IFACE
+         CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+         RETURN
+      END IF
+      PRODUCTS_THIS_STEP = PRODUCTS_THIS_STEP + N_PRODUCTS
+
+      SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_EVENT_COUNT_WINDOW = &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_EVENT_COUNT_WINDOW + 1_8
+      SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_WEIGHT_WINDOW = &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_WEIGHT_WINDOW + INCOMING_WEIGHT
+      SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_ENERGY_WEIGHTED_WINDOW = &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%INCIDENT_ENERGY_WEIGHTED_WINDOW + &
+           INCIDENT_ENERGY_EV*INCOMING_WEIGHT
+      SECONDARY_EMISSION_MODELS(MODEL_INDEX)%EMITTED_MACRO_COUNT_WINDOW = &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%EMITTED_MACRO_COUNT_WINDOW + INT(N_PRODUCTS, KIND=8)
+      SECONDARY_EMISSION_MODELS(MODEL_INDEX)%EMITTED_WEIGHT_WINDOW = &
+           SECONDARY_EMISSION_MODELS(MODEL_INDEX)%EMITTED_WEIGHT_WINDOW + &
+           REAL(N_PRODUCTS, KIND=8)*PRODUCT_WEIGHT
+
+      ALLOCATE(PRODUCT_BUFFER(N_PRODUCTS))
+      PRODUCT_TEMPERATURE = SECONDARY_EMISSION_MODELS(MODEL_INDEX)%SECONDARY_TEMPERATURE
+      ELECTRON_MASS = SPECIES(ELECTRON_ID)%MOLECULAR_MASS
+      DO I = 1, N_PRODUCTS
+         CALL MAXWELL(0.d0, 0.d0, 0.d0, PRODUCT_TEMPERATURE, PRODUCT_TEMPERATURE, &
+              PRODUCT_TEMPERATURE, V_DUMMY, V_TANG1, V_TANG2, ELECTRON_MASS)
+         V_NORMAL = FLX(0.d0, PRODUCT_TEMPERATURE, ELECTRON_MASS)
+         PRODUCT_BUFFER(I)%SPECIES_ID = ELECTRON_ID
+         PRODUCT_BUFFER(I)%IC = EVENT%IC
+         PRODUCT_BUFFER(I)%VELOCITY = V_NORMAL*EVENT%INWARD_NORMAL + &
+              V_TANG1*FACE_TANG1 + V_TANG2*FACE_TANG2
+         CALL INTERNAL_ENERGY(SPECIES(ELECTRON_ID)%ROTDOF, PRODUCT_TEMPERATURE, PRODUCT_BUFFER(I)%EROT)
+         CALL INTERNAL_ENERGY(SPECIES(ELECTRON_ID)%VIBDOF, PRODUCT_TEMPERATURE, PRODUCT_BUFFER(I)%EVIB)
+      END DO
+
+      ! Buffer every secondary first; append only after the incident particle
+      ! has been marked for removal, retaining the free-flight time after impact.
+      REMOVE_FLAGS(IP) = .TRUE.
+      particles(IP)%DTRIM = 0.d0
+      DO I = 1, N_PRODUCTS
+         CALL INIT_PARTICLE(EVENT%POSITION(1), EVENT%POSITION(2), EVENT%POSITION(3), &
+              PRODUCT_BUFFER(I)%VELOCITY(1), PRODUCT_BUFFER(I)%VELOCITY(2), &
+              PRODUCT_BUFFER(I)%VELOCITY(3), PRODUCT_BUFFER(I)%EROT, PRODUCT_BUFFER(I)%EVIB, &
+              PRODUCT_BUFFER(I)%SPECIES_ID, PRODUCT_BUFFER(I)%IC, EVENT%REMAINING_TIME, PARTICLE_NOW)
+         CALL SET_PARTICLE_SOURCE_TAG(PARTICLE_NOW, PARTICLE_SOURCE_OTHER)
+         CALL APPEND_ADVECT_PARTICLE(PARTICLE_NOW, REMOVE_FLAGS)
+         CALL UPDATE_FIXED_SURFACE_EMISSION_ELECTRODE(PARTICLE_NOW, FACE_PG, IC, PRODUCT_WEIGHT)
+         IF ((tID .GE. DUMP_GRID_START) .AND. (tID .NE. RESTART_TIMESTEP)) THEN
+            IF (MOD(tID-DUMP_BOUND_START, DUMP_BOUND_AVG_EVERY) .EQ. 0) &
+               CALL TALLY_PARTICLE_TO_BOUNDARY(.TRUE., PARTICLE_NOW, IC, IFACE)
+         END IF
+      END DO
+      DEALLOCATE(PRODUCT_BUFFER)
+   END SUBROUTINE HANDLE_SECONDARY_EMISSION
 
 
 
@@ -895,6 +1313,140 @@ MODULE timecycle
       ! ~~~~~~ At this point, exchange particles among processes ~~~~~~
 
    END SUBROUTINE VOLUME_INJECT
+
+
+   SUBROUTINE SOURCE_CONSTANT_FLUX_INJECT
+
+      IMPLICIT NONE
+      INTEGER :: N_INJECT, IP, IC, S_ID
+      REAL(KIND=8) :: SOURCE_VOLUME, EXPECTED, X, Y, Z, VX, VY, VZ, EROT, EVIB, MASS
+      TYPE(PARTICLE_DATA_STRUCTURE) :: PARTICLE_NOW
+
+      IF (.NOT. BOOL_SOURCE_CONSTANT_FLUX .OR. PROC_ID /= 0) RETURN
+
+      SOURCE_VOLUME = (SOURCE_REGION_XMAX-SOURCE_REGION_XMIN)*(YMAX-YMIN)*(ZMAX-ZMIN)
+      EXPECTED = SOURCE_FLUX_RATE*SOURCE_VOLUME*DT/(FNUM*SPECIES(SOURCE_FLUX_SPECIES)%SPWT)
+      SOURCE_FLUX_FRACTION = SOURCE_FLUX_FRACTION + EXPECTED
+      N_INJECT = INT(SOURCE_FLUX_FRACTION)
+      SOURCE_FLUX_FRACTION = SOURCE_FLUX_FRACTION - REAL(N_INJECT, KIND=8)
+
+      S_ID = SOURCE_FLUX_SPECIES
+      MASS = SPECIES(S_ID)%MOLECULAR_MASS
+      Y = 0.5d0*(YMIN+YMAX)
+      Z = 0.5d0*(ZMIN+ZMAX)
+
+      DO IP = 1, N_INJECT
+         X = SOURCE_REGION_XMIN + (SOURCE_REGION_XMAX-SOURCE_REGION_XMIN)*rf()
+         CALL CELL_FROM_POSITION(X, Y, IC)
+         CALL MAXWELL(SOURCE_FLUX_UX, SOURCE_FLUX_UY, SOURCE_FLUX_UZ, &
+                      SOURCE_FLUX_TEMP, SOURCE_FLUX_TEMP, SOURCE_FLUX_TEMP, VX, VY, VZ, MASS)
+         CALL INTERNAL_ENERGY(SPECIES(S_ID)%ROTDOF, SOURCE_FLUX_TEMP, EROT)
+         CALL INTERNAL_ENERGY(SPECIES(S_ID)%VIBDOF, SOURCE_FLUX_TEMP, EVIB)
+         CALL INIT_PARTICLE(X, Y, Z, VX, VY, VZ, EROT, EVIB, S_ID, IC, DT, PARTICLE_NOW)
+         CALL SET_PARTICLE_SOURCE_TAG(PARTICLE_NOW, PARTICLE_SOURCE_REGION)
+         CALL ADD_PARTICLE_ARRAY(PARTICLE_NOW, NP_PROC, particles)
+         SOURCE_FLUX_INJECTED_COUNT = SOURCE_FLUX_INJECTED_COUNT + 1
+      END DO
+
+   END SUBROUTINE SOURCE_CONSTANT_FLUX_INJECT
+
+
+   SUBROUTINE APPEND_ADVECT_PARTICLE(PARTICLE_TO_ADD, REMOVE_FLAGS)
+
+      IMPLICIT NONE
+      TYPE(PARTICLE_DATA_STRUCTURE), INTENT(IN) :: PARTICLE_TO_ADD
+      LOGICAL, DIMENSION(:), ALLOCATABLE, INTENT(INOUT) :: REMOVE_FLAGS
+      LOGICAL, DIMENSION(:), ALLOCATABLE :: TEMP_FLAGS
+      INTEGER :: OLD_CAPACITY, NEW_CAPACITY
+
+      OLD_CAPACITY = 0
+      IF (ALLOCATED(REMOVE_FLAGS)) OLD_CAPACITY = SIZE(REMOVE_FLAGS)
+      CALL ADD_PARTICLE_ARRAY(PARTICLE_TO_ADD, NP_PROC, particles)
+      IF (NP_PROC > OLD_CAPACITY) THEN
+         NEW_CAPACITY = MAX(NP_PROC, 5*MAX(OLD_CAPACITY,1))
+         ALLOCATE(TEMP_FLAGS(NEW_CAPACITY))
+         TEMP_FLAGS = .FALSE.
+         IF (OLD_CAPACITY > 0) TEMP_FLAGS(1:OLD_CAPACITY) = REMOVE_FLAGS
+         CALL MOVE_ALLOC(TEMP_FLAGS, REMOVE_FLAGS)
+      END IF
+      REMOVE_FLAGS(NP_PROC) = .FALSE.
+
+   END SUBROUTINE APPEND_ADVECT_PARTICLE
+
+
+   INTEGER FUNCTION FIND_SOURCE_REINJECTION_RULE(SPECIES_ID, LOSS_FACE) RESULT(RULE_INDEX)
+
+      IMPLICIT NONE
+      INTEGER, INTENT(IN) :: SPECIES_ID, LOSS_FACE
+      INTEGER :: I
+
+      RULE_INDEX = 0
+      IF (N_SOURCE_REINJECTION_RULES > 0) THEN
+         DO I = 1, N_SOURCE_REINJECTION_RULES
+            IF (SOURCE_REINJECTION_RULES(I)%TRIGGER_SPECIES == SPECIES_ID .AND. &
+                SOURCE_REINJECTION_RULES(I)%LOSS_FACE == LOSS_FACE) THEN
+               RULE_INDEX = I
+               RETURN
+            END IF
+         END DO
+      ELSE IF (SOURCE_REINJECTION_MODE /= SOURCE_REINJECT_NONE .AND. &
+               SOURCE_TRIGGER_SPECIES == SPECIES_ID .AND. SOURCE_LOSS_FACE == LOSS_FACE) THEN
+         RULE_INDEX = 1
+      END IF
+
+   END FUNCTION FIND_SOURCE_REINJECTION_RULE
+
+
+   SUBROUTINE SOURCE_REINJECT_PARTICLES(REMAINING_TIME, REMOVE_FLAGS, RULE_INDEX)
+
+      IMPLICIT NONE
+      REAL(KIND=8), INTENT(IN) :: REMAINING_TIME
+      LOGICAL, DIMENSION(:), ALLOCATABLE, INTENT(INOUT) :: REMOVE_FLAGS
+      INTEGER, OPTIONAL, INTENT(IN) :: RULE_INDEX
+      TYPE(PARTICLE_DATA_STRUCTURE) :: PARTICLE_NOW
+      TYPE(SOURCE_REINJECTION_RULE) :: RULE
+      INTEGER :: PRODUCT_INDEX, S_ID, IC, SELECTED_RULE
+      REAL(KIND=8) :: PRODUCT_TEMP, X, Y, Z, VX, VY, VZ, EROT, EVIB, MASS
+
+      SELECTED_RULE = 1
+      IF (PRESENT(RULE_INDEX)) SELECTED_RULE = RULE_INDEX
+      IF (N_SOURCE_REINJECTION_RULES > 0) THEN
+         IF (SELECTED_RULE < 1 .OR. SELECTED_RULE > N_SOURCE_REINJECTION_RULES) &
+            CALL ERROR_ABORT('Invalid source reinjection rule index.')
+         RULE = SOURCE_REINJECTION_RULES(SELECTED_RULE)
+      ELSE
+         RULE%MODE = SOURCE_REINJECTION_MODE
+         RULE%PRODUCT_SPECIES_1 = SOURCE_PRODUCT_SPECIES_1
+         RULE%PRODUCT_SPECIES_2 = SOURCE_PRODUCT_SPECIES_2
+         RULE%PRODUCT_TEMP_1 = SOURCE_PRODUCT_TEMP_1
+         RULE%PRODUCT_TEMP_2 = SOURCE_PRODUCT_TEMP_2
+      END IF
+
+      Y = 0.5d0*(YMIN+YMAX)
+      Z = 0.5d0*(ZMIN+ZMAX)
+      X = SOURCE_REGION_XMIN + (SOURCE_REGION_XMAX-SOURCE_REGION_XMIN)*rf()
+      CALL CELL_FROM_POSITION(X, Y, IC)
+
+      DO PRODUCT_INDEX = 1, 1 + MERGE(1,0,RULE%MODE == SOURCE_REINJECT_PAIR)
+         IF (PRODUCT_INDEX == 1) THEN
+            S_ID = RULE%PRODUCT_SPECIES_1
+            PRODUCT_TEMP = RULE%PRODUCT_TEMP_1
+         ELSE
+            S_ID = RULE%PRODUCT_SPECIES_2
+            PRODUCT_TEMP = RULE%PRODUCT_TEMP_2
+         END IF
+         MASS = SPECIES(S_ID)%MOLECULAR_MASS
+         CALL MAXWELL(0.d0, 0.d0, 0.d0, PRODUCT_TEMP, PRODUCT_TEMP, PRODUCT_TEMP, VX, VY, VZ, MASS)
+         CALL INTERNAL_ENERGY(SPECIES(S_ID)%ROTDOF, PRODUCT_TEMP, EROT)
+         CALL INTERNAL_ENERGY(SPECIES(S_ID)%VIBDOF, PRODUCT_TEMP, EVIB)
+         CALL INIT_PARTICLE(X, Y, Z, VX, VY, VZ, EROT, EVIB, S_ID, IC, &
+                            MAX(0.d0,REMAINING_TIME), PARTICLE_NOW)
+         CALL SET_PARTICLE_SOURCE_TAG(PARTICLE_NOW, PARTICLE_SOURCE_REGION)
+         CALL APPEND_ADVECT_PARTICLE(PARTICLE_NOW, REMOVE_FLAGS)
+         SOURCE_REINJECTED_COUNT = SOURCE_REINJECTED_COUNT + 1
+      END DO
+
+   END SUBROUTINE SOURCE_REINJECT_PARTICLES
 
 
 
@@ -1205,6 +1757,7 @@ MODULE timecycle
       LOGICAL, DIMENSION(:), ALLOCATABLE :: REMOVE_PART
       REAL(KIND=8), DIMENSION(3) :: V_OLD, V_NEW
       REAL(KIND=8), DIMENSION(3) :: E, B
+      REAL(KIND=8), DIMENSION(3) :: B_EXTERNAL
       REAL(KIND=8), DIMENSION(3) :: FACE_NORMAL, FACE_TANG1, FACE_TANG2
       REAL(KIND=8), DIMENSION(3) :: TANG1, TANG2
       REAL(KIND=8) :: VDOTTANG1, VRM, RN, R1, R2, THETA1, THETA2, DOT_NORM, VTANGENT
@@ -1219,6 +1772,13 @@ MODULE timecycle
       INTEGER :: NEIGHBORPG
       REAL(KIND=8) :: CHARGE, K, PSIP, RHO_Q, SPWT
       INTEGER :: VP, VMN
+      INTEGER :: SOURCE_EVENTS_THIS_STEP
+      INTEGER :: SOURCE_RULE_INDEX
+      INTEGER :: SEE_EVENTS_THIS_STEP, SEE_PRODUCTS_THIS_STEP, I_SEE_MODEL
+      REAL(KIND=8) :: SOURCE_REMAINING_TIME
+      INTEGER :: PERIODIC_DEST_CELL, ZERO_TIME_PERIODIC_CROSSINGS, PERIODIC_MAP_ERROR
+      REAL(KIND=8) :: PERIODIC_MAPPED_POINT(3), PERIODIC_TIME_TOL
+      CHARACTER(LEN=256) :: PERIODIC_MAP_MESSAGE
 
       REAL(KIND=8) :: VXPRE, VYPRE, VZPRE
       REAL(KIND=8) :: XI_PRE, XI_POST, P_REINJECTION
@@ -1241,6 +1801,9 @@ MODULE timecycle
       BOUNDPOS = [ XMIN, XMAX, YMIN, YMAX ]
 
       ALLOCATE(REMOVE_PART(NP_PROC))
+      SOURCE_EVENTS_THIS_STEP = 0
+      SEE_EVENTS_THIS_STEP = 0
+      SEE_PRODUCTS_THIS_STEP = 0
       
       ALLOCATE(LOCAL_BOUNDARY_COLL_COUNT(4*N_SPECIES))
       LOCAL_BOUNDARY_COLL_COUNT = 0
@@ -1253,7 +1816,8 @@ MODULE timecycle
       ! OPEN(66341, FILE='washboarddump', POSITION='append', STATUS='unknown', ACTION='write')
 
 
-      DO IP = 1, NP_PROC
+      IP = 1
+      DO WHILE (IP <= NP_PROC)
          REMOVE_PART(IP) = .FALSE.
 
          ! Update velocity
@@ -1271,7 +1835,8 @@ MODULE timecycle
             IF (N_SOLENOIDS > 0 .OR. N_MAGNETS > 0) CALL APPLY_B_FIELD(IP, B)
             IF (BOOL_MAGNETIC_DIPOLE) CALL APPLY_B_DIPOLE_FIELD(IP, B)
 
-            B = B + EXTERNAL_B_FIELD
+            CALL GET_B_FIELD_AT_PARTICLE(particles(IP), B_EXTERNAL)
+            B = B + B_EXTERNAL
             E = E + EXTERNAL_E_FIELD
             ! CALL APPLY_RF_EB_FIELD(particles, IP, E, B)
             
@@ -1335,6 +1900,7 @@ MODULE timecycle
 
          HASCOLLIDED = .FALSE.
          TOTDTCOLL = 0.
+         ZERO_TIME_PERIODIC_CROSSINGS = 0
          DO WHILE (particles(IP)%DTRIM .GT. 0.) ! Repeat the procedure until step is done
 
             DTCOLL = particles(IP)%DTRIM ! Looking for collisions within the remaining time
@@ -1534,6 +2100,45 @@ MODULE timecycle
                      FACE_TANG2 = U3D_GRID%FACE_TANG2(:,BOUNDCOLL,IC)
                   END IF
 
+                  ! A mapped 3D periodic face is a continuation of the same
+                  ! free flight, not a physical wall event.  The particle
+                  ! position and remaining time have already been advanced to
+                  ! this face above.
+                  IF (DIMS == 3 .AND. ALLOCATED(U3D_GRID%PERIODIC_PARTNER_CELL)) THEN
+                     PERIODIC_DEST_CELL = U3D_GRID%PERIODIC_PARTNER_CELL(BOUNDCOLL,IC)
+                     IF (PERIODIC_DEST_CELL > 0) THEN
+                        PERIODIC_TIME_TOL = MAX(1.d-30, 64.d0*EPSILON(1.d0)*ABS(DT))
+                        IF (DTCOLL <= PERIODIC_TIME_TOL) THEN
+                           ZERO_TIME_PERIODIC_CROSSINGS = ZERO_TIME_PERIODIC_CROSSINGS + 1
+                        ELSE
+                           ZERO_TIME_PERIODIC_CROSSINGS = 0
+                        END IF
+                        IF (ZERO_TIME_PERIODIC_CROSSINGS > 8) THEN
+                           WRITE(PERIODIC_MAP_MESSAGE,'(A,I0,A,I0,A,I0,A,I0,A,I0,A,ES14.6)') &
+                              'Repeated zero-time periodic crossings for particle ', particles(IP)%ID, &
+                              ', source cell/face ', IC, '/', BOUNDCOLL, ', destination cell ', &
+                              PERIODIC_DEST_CELL, ', remaining time ', particles(IP)%DTRIM
+                           CALL ERROR_ABORT(TRIM(PERIODIC_MAP_MESSAGE))
+                        END IF
+
+                        CALL MAP_PERIODIC_FACE_POINT(IC, BOUNDCOLL, particles(IP)%X, &
+                             particles(IP)%Y, particles(IP)%Z, PERIODIC_MAPPED_POINT, PERIODIC_MAP_ERROR)
+                        IF (PERIODIC_MAP_ERROR /= 0) THEN
+                           WRITE(PERIODIC_MAP_MESSAGE,'(A,I0,A,I0,A,I0)') &
+                              'Invalid periodic point map for particle ', particles(IP)%ID, &
+                              ', source cell/face ', IC, '/', BOUNDCOLL
+                           CALL ERROR_ABORT(TRIM(PERIODIC_MAP_MESSAGE))
+                        END IF
+
+                        particles(IP)%X = PERIODIC_MAPPED_POINT(1)
+                        particles(IP)%Y = PERIODIC_MAPPED_POINT(2)
+                        particles(IP)%Z = PERIODIC_MAPPED_POINT(3)
+                        particles(IP)%IC = PERIODIC_DEST_CELL
+                        IC = PERIODIC_DEST_CELL
+                        CYCLE
+                     END IF
+                  END IF
+
 
                   ! Apply boundary conditions
                   IF (FLUIDBOUNDARY) THEN
@@ -1615,7 +2220,12 @@ MODULE timecycle
                         END IF
 
                         ! Apply particle boundary condition
-                        IF (GRID_BC(FACE_PG)%PARTICLE_BC(particles(IP)%S_ID) == SPECULAR) THEN
+                        I_SEE_MODEL = FIND_SECONDARY_EMISSION_MODEL(FACE_PG, particles(IP)%S_ID)
+                        IF (I_SEE_MODEL > 0) THEN
+                           CALL HANDLE_SECONDARY_EMISSION(IP, IC, BOUNDCOLL, FACE_PG, &
+                                FACE_NORMAL, FACE_TANG1, FACE_TANG2, I_SEE_MODEL, REMOVE_PART, &
+                                SEE_EVENTS_THIS_STEP, SEE_PRODUCTS_THIS_STEP)
+                        ELSE IF (GRID_BC(FACE_PG)%PARTICLE_BC(particles(IP)%S_ID) == SPECULAR) THEN
                            IF (GRID_BC(FACE_PG)%REACT) THEN
                               CALL WALL_REACT(particles, IP, REMOVE_PART(IP))
                            END IF
@@ -1852,6 +2462,7 @@ MODULE timecycle
                   ELSE
                      particles(IP)%IC = NEIGHBOR
                      IC = NEIGHBOR
+                     ZERO_TIME_PERIODIC_CROSSINGS = 0
                      !WRITE(*,*) 'moved particle to cell: ', IC
                   END IF
                ELSE
@@ -2138,8 +2749,21 @@ MODULE timecycle
 
                   ELSE
 
-                     REMOVE_PART(IP) = .TRUE.
-                     particles(IP)%DTRIM = 0.
+                     SOURCE_RULE_INDEX = FIND_SOURCE_REINJECTION_RULE(particles(IP)%S_ID, BOUNDCOLL)
+                     IF (SOURCE_RULE_INDEX > 0) THEN
+                        CALL MOVE_PARTICLE(IP, DTCOLL)
+                        SOURCE_REMAINING_TIME = MAX(0.d0, particles(IP)%DTRIM-DTCOLL)
+                        particles(IP)%DTRIM = 0.d0
+                        REMOVE_PART(IP) = .TRUE.
+                        SOURCE_LOSS_COUNT = SOURCE_LOSS_COUNT + 1
+                        SOURCE_EVENTS_THIS_STEP = SOURCE_EVENTS_THIS_STEP + 1
+                        IF (SOURCE_EVENTS_THIS_STEP > 100000) &
+                           CALL ERROR_ABORT('Source reinjection exceeded 100000 loss events in one timestep.')
+                        CALL SOURCE_REINJECT_PARTICLES(SOURCE_REMAINING_TIME, REMOVE_PART, SOURCE_RULE_INDEX)
+                     ELSE
+                        REMOVE_PART(IP) = .TRUE.
+                        particles(IP)%DTRIM = 0.d0
+                     END IF
 
                   END IF
                ELSE IF (WALLCOLL .NE. -1) THEN
@@ -2313,7 +2937,8 @@ MODULE timecycle
          !particles(IP)%VZ = V_NEW(3)
 
 
-      END DO ! End loop: DO IP = 1,NP_PROC
+         IP = IP + 1
+      END DO ! End loop over original and same-timestep reinjected particles
 
 
       
@@ -2386,6 +3011,73 @@ MODULE timecycle
       !CLOSE(66341)
 
    END SUBROUTINE ADVECT
+
+
+   SUBROUTINE MAP_PERIODIC_FACE_POINT(SOURCE_CELL, SOURCE_FACE, X, Y, Z, MAPPED_POINT, ERROR_CODE)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: SOURCE_CELL, SOURCE_FACE
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      REAL(KIND=8), INTENT(IN) :: X, Y, Z
+      REAL(KIND=8), DIMENSION(3), INTENT(OUT) :: MAPPED_POINT
+      REAL(KIND=8), DIMENSION(3) :: SOURCE_POINT, SOURCE_ORIGIN, EDGE_1, EDGE_2, RELATIVE_POINT
+      REAL(KIND=8), DIMENSION(3) :: TARGET_POINT_1, TARGET_POINT_2, TARGET_POINT_3
+      REAL(KIND=8) :: DOT_11, DOT_12, DOT_22, DOT_1P, DOT_2P, DENOMINATOR
+      REAL(KIND=8) :: WEIGHT_1, WEIGHT_2, WEIGHT_3
+      INTEGER :: DEST_CELL, DEST_FACE, TARGET_NODE, I
+
+      ERROR_CODE = 1
+      MAPPED_POINT = 0.d0
+      IF (.NOT. ALLOCATED(U3D_GRID%PERIODIC_PARTNER_CELL) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%PERIODIC_PARTNER_FACE) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%PERIODIC_VERTEX_PERM) .OR. &
+          .NOT. ALLOCATED(U3D_GRID%FACE_NODES) .OR. .NOT. ALLOCATED(U3D_GRID%NODE_COORDS)) RETURN
+      IF (SOURCE_CELL < 1 .OR. SOURCE_CELL > U3D_GRID%NUM_CELLS .OR. &
+          SOURCE_FACE < 1 .OR. SOURCE_FACE > 4) RETURN
+
+      DEST_CELL = U3D_GRID%PERIODIC_PARTNER_CELL(SOURCE_FACE,SOURCE_CELL)
+      DEST_FACE = U3D_GRID%PERIODIC_PARTNER_FACE(SOURCE_FACE,SOURCE_CELL)
+      IF (DEST_CELL < 1 .OR. DEST_CELL > U3D_GRID%NUM_CELLS .OR. DEST_FACE < 1 .OR. DEST_FACE > 4) RETURN
+
+      SOURCE_POINT = [X,Y,Z]
+      SOURCE_ORIGIN = U3D_GRID%NODE_COORDS(:,U3D_GRID%FACE_NODES(1,SOURCE_FACE,SOURCE_CELL))
+      EDGE_1 = U3D_GRID%NODE_COORDS(:,U3D_GRID%FACE_NODES(2,SOURCE_FACE,SOURCE_CELL)) - SOURCE_ORIGIN
+      EDGE_2 = U3D_GRID%NODE_COORDS(:,U3D_GRID%FACE_NODES(3,SOURCE_FACE,SOURCE_CELL)) - SOURCE_ORIGIN
+      RELATIVE_POINT = SOURCE_POINT - SOURCE_ORIGIN
+
+      DOT_11 = DOT_PRODUCT(EDGE_1,EDGE_1)
+      DOT_12 = DOT_PRODUCT(EDGE_1,EDGE_2)
+      DOT_22 = DOT_PRODUCT(EDGE_2,EDGE_2)
+      DOT_1P = DOT_PRODUCT(EDGE_1,RELATIVE_POINT)
+      DOT_2P = DOT_PRODUCT(EDGE_2,RELATIVE_POINT)
+      DENOMINATOR = DOT_11*DOT_22 - DOT_12*DOT_12
+      IF (ABS(DENOMINATOR) <= TINY(1.d0)) RETURN
+
+      WEIGHT_2 = (DOT_22*DOT_1P - DOT_12*DOT_2P)/DENOMINATOR
+      WEIGHT_3 = (DOT_11*DOT_2P - DOT_12*DOT_1P)/DENOMINATOR
+      WEIGHT_1 = 1.d0 - WEIGHT_2 - WEIGHT_3
+
+      DO I = 1, 3
+         TARGET_NODE = U3D_GRID%PERIODIC_VERTEX_PERM(I,SOURCE_FACE,SOURCE_CELL)
+         IF (TARGET_NODE < 1 .OR. TARGET_NODE > 3) RETURN
+         SELECT CASE (I)
+         CASE (1)
+            TARGET_POINT_1 = U3D_GRID%NODE_COORDS(:, &
+                 U3D_GRID%FACE_NODES(TARGET_NODE,DEST_FACE,DEST_CELL))
+         CASE (2)
+            TARGET_POINT_2 = U3D_GRID%NODE_COORDS(:, &
+                 U3D_GRID%FACE_NODES(TARGET_NODE,DEST_FACE,DEST_CELL))
+         CASE (3)
+            TARGET_POINT_3 = U3D_GRID%NODE_COORDS(:, &
+                 U3D_GRID%FACE_NODES(TARGET_NODE,DEST_FACE,DEST_CELL))
+         END SELECT
+      END DO
+
+      MAPPED_POINT = WEIGHT_1*TARGET_POINT_1 + WEIGHT_2*TARGET_POINT_2 + WEIGHT_3*TARGET_POINT_3
+      ERROR_CODE = 0
+
+   END SUBROUTINE MAP_PERIODIC_FACE_POINT
 
 
    SUBROUTINE UPDATE_VELOCITY_BORIS(DTIME, V_OLD, V_NEW, CHARGE, MASS, E, B)

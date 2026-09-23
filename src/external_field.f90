@@ -1,0 +1,331 @@
+MODULE external_field
+
+   USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
+
+   IMPLICIT NONE
+   PRIVATE
+
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_OK = 0
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_FILE_ERROR = 1
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_HEADER_ERROR = 2
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_DATA_ERROR = 3
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_GRID_ERROR = 4
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_INCOMPLETE = 5
+   INTEGER, PARAMETER, PUBLIC :: EXTERNAL_FIELD_OUT_OF_RANGE = 6
+
+   LOGICAL :: FIELD_LOADED = .FALSE.
+   REAL(KIND=8), ALLOCATABLE :: X_GRID(:), Y_GRID(:), Z_GRID(:)
+   REAL(KIND=8), ALLOCATABLE :: B_GRID(:,:,:,:)
+
+   PUBLIC :: LOAD_EXTERNAL_B_FIELD_FILE
+   PUBLIC :: GET_EXTERNAL_B_FIELD
+   PUBLIC :: EXTERNAL_FIELD_LOADED
+
+CONTAINS
+
+   LOGICAL FUNCTION EXTERNAL_FIELD_LOADED()
+      EXTERNAL_FIELD_LOADED = FIELD_LOADED
+   END FUNCTION EXTERNAL_FIELD_LOADED
+
+
+   SUBROUTINE LOAD_EXTERNAL_B_FIELD_FILE(FILENAME, ERROR_CODE, ERROR_MESSAGE)
+
+      CHARACTER(LEN=*), INTENT(IN) :: FILENAME
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      CHARACTER(LEN=*), INTENT(OUT) :: ERROR_MESSAGE
+
+      INTEGER :: UNIT_ID, IOS, ROW_COUNT, I, J, K, IX, IY, IZ
+      INTEGER :: NX, NY, NZ, GRID_COUNT
+      CHARACTER(LEN=1024) :: LINE
+      CHARACTER(LEN=128) :: HEADER
+      REAL(KIND=8), ALLOCATABLE :: RAW_DATA(:,:)
+      REAL(KIND=8), ALLOCATABLE :: X_RAW(:), Y_RAW(:), Z_RAW(:)
+      LOGICAL, ALLOCATABLE :: SEEN(:,:,:)
+      REAL(KIND=8), DIMENSION(3) :: B_COMPONENT
+      REAL(KIND=8) :: X_VALUE, Y_VALUE, Z_VALUE
+      INTEGER :: HEADER_FOUND
+
+      ERROR_CODE = EXTERNAL_FIELD_OK
+      ERROR_MESSAGE = ''
+      FIELD_LOADED = .FALSE.
+      IF (ALLOCATED(X_GRID)) DEALLOCATE(X_GRID)
+      IF (ALLOCATED(Y_GRID)) DEALLOCATE(Y_GRID)
+      IF (ALLOCATED(Z_GRID)) DEALLOCATE(Z_GRID)
+      IF (ALLOCATED(B_GRID)) DEALLOCATE(B_GRID)
+
+      OPEN(NEWUNIT=UNIT_ID, FILE=TRIM(FILENAME), STATUS='old', ACTION='read', IOSTAT=IOS)
+      IF (IOS /= 0) THEN
+         ERROR_CODE = EXTERNAL_FIELD_FILE_ERROR
+         ERROR_MESSAGE = 'Cannot open external magnetic-field CSV: '//TRIM(FILENAME)
+         RETURN
+      END IF
+
+      HEADER_FOUND = 0
+      ROW_COUNT = 0
+      DO
+         READ(UNIT_ID,'(A)',IOSTAT=IOS) LINE
+         IF (IOS /= 0) EXIT
+         IF (IS_IGNORABLE_LINE(LINE)) CYCLE
+         IF (HEADER_FOUND == 0) THEN
+            HEADER = ADJUSTL(TRIM(LINE))
+            IF (TRIM(HEADER) /= 'x_m,y_m,z_m,Bx_T,By_T,Bz_T') THEN
+               CLOSE(UNIT_ID)
+               ERROR_CODE = EXTERNAL_FIELD_HEADER_ERROR
+               ERROR_MESSAGE = 'External magnetic-field CSV header must be x_m,y_m,z_m,Bx_T,By_T,Bz_T.'
+               RETURN
+            END IF
+            HEADER_FOUND = 1
+            CYCLE
+         END IF
+         READ(LINE,*,IOSTAT=IOS) X_VALUE, Y_VALUE, Z_VALUE, &
+                                  B_COMPONENT(1), B_COMPONENT(2), B_COMPONENT(3)
+         IF (IOS /= 0) THEN
+            CLOSE(UNIT_ID)
+            ERROR_CODE = EXTERNAL_FIELD_DATA_ERROR
+            ERROR_MESSAGE = 'Malformed external magnetic-field CSV data row.'
+            RETURN
+         END IF
+         IF (.NOT. ALL(IEEE_IS_FINITE([X_VALUE,Y_VALUE,Z_VALUE,B_COMPONENT(1), &
+                                       B_COMPONENT(2),B_COMPONENT(3)]))) THEN
+            CLOSE(UNIT_ID)
+            ERROR_CODE = EXTERNAL_FIELD_DATA_ERROR
+            ERROR_MESSAGE = 'External magnetic-field CSV contains a non-finite value.'
+            RETURN
+         END IF
+         ROW_COUNT = ROW_COUNT + 1
+      END DO
+      CLOSE(UNIT_ID)
+
+      IF (HEADER_FOUND == 0 .OR. ROW_COUNT == 0) THEN
+         ERROR_CODE = EXTERNAL_FIELD_DATA_ERROR
+         ERROR_MESSAGE = 'External magnetic-field CSV contains no data rows.'
+         RETURN
+      END IF
+
+      ALLOCATE(RAW_DATA(6,ROW_COUNT), X_RAW(ROW_COUNT), Y_RAW(ROW_COUNT), Z_RAW(ROW_COUNT))
+      OPEN(NEWUNIT=UNIT_ID, FILE=TRIM(FILENAME), STATUS='old', ACTION='read', IOSTAT=IOS)
+      IF (IOS /= 0) THEN
+         ERROR_CODE = EXTERNAL_FIELD_FILE_ERROR
+         ERROR_MESSAGE = 'Cannot reopen external magnetic-field CSV.'
+         DEALLOCATE(RAW_DATA,X_RAW,Y_RAW,Z_RAW)
+         RETURN
+      END IF
+      HEADER_FOUND = 0
+      I = 0
+      DO
+         READ(UNIT_ID,'(A)',IOSTAT=IOS) LINE
+         IF (IOS /= 0) EXIT
+         IF (IS_IGNORABLE_LINE(LINE)) CYCLE
+         IF (HEADER_FOUND == 0) THEN
+            HEADER_FOUND = 1
+            CYCLE
+         END IF
+         I = I + 1
+         READ(LINE,*) RAW_DATA(:,I)
+         X_RAW(I) = RAW_DATA(1,I)
+         Y_RAW(I) = RAW_DATA(2,I)
+         Z_RAW(I) = RAW_DATA(3,I)
+      END DO
+      CLOSE(UNIT_ID)
+
+      CALL BUILD_UNIQUE_SORTED_GRID(X_RAW, X_GRID, ERROR_CODE, ERROR_MESSAGE)
+      IF (ERROR_CODE /= EXTERNAL_FIELD_OK) GOTO 900
+      CALL BUILD_UNIQUE_SORTED_GRID(Y_RAW, Y_GRID, ERROR_CODE, ERROR_MESSAGE)
+      IF (ERROR_CODE /= EXTERNAL_FIELD_OK) GOTO 900
+      CALL BUILD_UNIQUE_SORTED_GRID(Z_RAW, Z_GRID, ERROR_CODE, ERROR_MESSAGE)
+      IF (ERROR_CODE /= EXTERNAL_FIELD_OK) GOTO 900
+
+      NX = SIZE(X_GRID); NY = SIZE(Y_GRID); NZ = SIZE(Z_GRID)
+      IF (NX < 2 .OR. NY < 2 .OR. NZ < 2) THEN
+         ERROR_CODE = EXTERNAL_FIELD_GRID_ERROR
+         ERROR_MESSAGE = 'External magnetic-field CSV requires at least two coordinates per axis.'
+         GOTO 900
+      END IF
+      ALLOCATE(B_GRID(3,NX,NY,NZ), SEEN(NX,NY,NZ))
+      B_GRID = 0.d0
+      SEEN = .FALSE.
+
+      DO I = 1, ROW_COUNT
+         IX = FIND_GRID_INDEX(X_GRID, RAW_DATA(1,I))
+         IY = FIND_GRID_INDEX(Y_GRID, RAW_DATA(2,I))
+         IZ = FIND_GRID_INDEX(Z_GRID, RAW_DATA(3,I))
+         IF (IX < 1 .OR. IY < 1 .OR. IZ < 1) THEN
+            ERROR_CODE = EXTERNAL_FIELD_GRID_ERROR
+            ERROR_MESSAGE = 'External magnetic-field CSV coordinate is not on the reconstructed grid.'
+            GOTO 900
+         END IF
+         IF (SEEN(IX,IY,IZ)) THEN
+            ERROR_CODE = EXTERNAL_FIELD_GRID_ERROR
+            ERROR_MESSAGE = 'External magnetic-field CSV contains duplicate grid points.'
+            GOTO 900
+         END IF
+         B_GRID(:,IX,IY,IZ) = RAW_DATA(4:6,I)
+         SEEN(IX,IY,IZ) = .TRUE.
+      END DO
+
+      GRID_COUNT = NX*NY*NZ
+      IF (COUNT(SEEN) /= GRID_COUNT) THEN
+         ERROR_CODE = EXTERNAL_FIELD_INCOMPLETE
+         ERROR_MESSAGE = 'External magnetic-field CSV does not contain a complete rectilinear grid.'
+         GOTO 900
+      END IF
+
+      FIELD_LOADED = .TRUE.
+
+900   CONTINUE
+      IF (ALLOCATED(RAW_DATA)) DEALLOCATE(RAW_DATA)
+      IF (ALLOCATED(X_RAW)) DEALLOCATE(X_RAW)
+      IF (ALLOCATED(Y_RAW)) DEALLOCATE(Y_RAW)
+      IF (ALLOCATED(Z_RAW)) DEALLOCATE(Z_RAW)
+      IF (ALLOCATED(SEEN)) DEALLOCATE(SEEN)
+      IF (ERROR_CODE /= EXTERNAL_FIELD_OK) THEN
+         IF (ALLOCATED(X_GRID)) DEALLOCATE(X_GRID)
+         IF (ALLOCATED(Y_GRID)) DEALLOCATE(Y_GRID)
+         IF (ALLOCATED(Z_GRID)) DEALLOCATE(Z_GRID)
+         IF (ALLOCATED(B_GRID)) DEALLOCATE(B_GRID)
+      END IF
+
+   END SUBROUTINE LOAD_EXTERNAL_B_FIELD_FILE
+
+
+   SUBROUTINE GET_EXTERNAL_B_FIELD(X, Y, Z, B, ERROR_CODE, ERROR_MESSAGE)
+
+      REAL(KIND=8), INTENT(IN) :: X, Y, Z
+      REAL(KIND=8), DIMENSION(3), INTENT(OUT) :: B
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      CHARACTER(LEN=*), INTENT(OUT) :: ERROR_MESSAGE
+      INTEGER :: IX, IY, IZ
+      REAL(KIND=8) :: TX, TY, TZ
+
+      B = 0.d0
+      ERROR_CODE = EXTERNAL_FIELD_OK
+      ERROR_MESSAGE = ''
+      IF (.NOT. FIELD_LOADED) THEN
+         ERROR_CODE = EXTERNAL_FIELD_FILE_ERROR
+         ERROR_MESSAGE = 'External magnetic-field data are not loaded.'
+         RETURN
+      END IF
+      IF (.NOT. ALL(IEEE_IS_FINITE([X,Y,Z]))) THEN
+         ERROR_CODE = EXTERNAL_FIELD_OUT_OF_RANGE
+         ERROR_MESSAGE = 'External magnetic-field query coordinates must be finite.'
+         RETURN
+      END IF
+      IF (X < X_GRID(1) .OR. X > X_GRID(SIZE(X_GRID)) .OR. &
+          Y < Y_GRID(1) .OR. Y > Y_GRID(SIZE(Y_GRID)) .OR. &
+          Z < Z_GRID(1) .OR. Z > Z_GRID(SIZE(Z_GRID))) THEN
+         ERROR_CODE = EXTERNAL_FIELD_OUT_OF_RANGE
+         ERROR_MESSAGE = 'External magnetic-field query lies outside the loaded coverage.'
+         RETURN
+      END IF
+
+      IX = LOWER_INTERVAL(X_GRID,X)
+      IY = LOWER_INTERVAL(Y_GRID,Y)
+      IZ = LOWER_INTERVAL(Z_GRID,Z)
+      TX = (X-X_GRID(IX))/(X_GRID(IX+1)-X_GRID(IX))
+      TY = (Y-Y_GRID(IY))/(Y_GRID(IY+1)-Y_GRID(IY))
+      TZ = (Z-Z_GRID(IZ))/(Z_GRID(IZ+1)-Z_GRID(IZ))
+
+      B = (1-TX)*(1-TY)*(1-TZ)*B_GRID(:,IX,IY,IZ) &
+        + TX*(1-TY)*(1-TZ)*B_GRID(:,IX+1,IY,IZ) &
+        + (1-TX)*TY*(1-TZ)*B_GRID(:,IX,IY+1,IZ) &
+        + TX*TY*(1-TZ)*B_GRID(:,IX+1,IY+1,IZ) &
+        + (1-TX)*(1-TY)*TZ*B_GRID(:,IX,IY,IZ+1) &
+        + TX*(1-TY)*TZ*B_GRID(:,IX+1,IY,IZ+1) &
+        + (1-TX)*TY*TZ*B_GRID(:,IX,IY+1,IZ+1) &
+        + TX*TY*TZ*B_GRID(:,IX+1,IY+1,IZ+1)
+
+   END SUBROUTINE GET_EXTERNAL_B_FIELD
+
+
+   LOGICAL FUNCTION IS_IGNORABLE_LINE(LINE)
+      CHARACTER(LEN=*), INTENT(IN) :: LINE
+      CHARACTER(LEN=1024) :: CLEAN_LINE
+      CLEAN_LINE = ADJUSTL(TRIM(LINE))
+      IS_IGNORABLE_LINE = LEN_TRIM(CLEAN_LINE) == 0 .OR. CLEAN_LINE(1:1) == '#'
+   END FUNCTION IS_IGNORABLE_LINE
+
+
+   SUBROUTINE BUILD_UNIQUE_SORTED_GRID(RAW, GRID, ERROR_CODE, ERROR_MESSAGE)
+      REAL(KIND=8), DIMENSION(:), INTENT(IN) :: RAW
+      REAL(KIND=8), ALLOCATABLE, INTENT(OUT) :: GRID(:)
+      INTEGER, INTENT(OUT) :: ERROR_CODE
+      CHARACTER(LEN=*), INTENT(OUT) :: ERROR_MESSAGE
+      INTEGER :: I, N
+      REAL(KIND=8), ALLOCATABLE :: TEMP(:)
+
+      ERROR_CODE = EXTERNAL_FIELD_OK
+      ERROR_MESSAGE = ''
+      ALLOCATE(TEMP(SIZE(RAW)))
+      N = 0
+      DO I = 1, SIZE(RAW)
+         IF (N == 0) THEN
+            N = N + 1
+            TEMP(N) = RAW(I)
+         ELSE IF (.NOT. ANY(ABS(TEMP(1:N)-RAW(I)) <= 1.d-12*MAX(1.d0,ABS(RAW(I))))) THEN
+            N = N + 1
+            TEMP(N) = RAW(I)
+         END IF
+      END DO
+      IF (N < 2) THEN
+         ERROR_CODE = EXTERNAL_FIELD_GRID_ERROR
+         ERROR_MESSAGE = 'External magnetic-field coordinates are not a valid grid.'
+         DEALLOCATE(TEMP)
+         RETURN
+      END IF
+      ALLOCATE(GRID(N))
+      GRID = TEMP(1:N)
+      CALL SORT_REAL(GRID)
+      IF (ANY(GRID(2:N) <= GRID(1:N-1))) THEN
+         ERROR_CODE = EXTERNAL_FIELD_GRID_ERROR
+         ERROR_MESSAGE = 'External magnetic-field coordinates must be strictly monotonic.'
+         DEALLOCATE(GRID)
+      END IF
+      DEALLOCATE(TEMP)
+   END SUBROUTINE BUILD_UNIQUE_SORTED_GRID
+
+
+   SUBROUTINE SORT_REAL(VALUES)
+      REAL(KIND=8), DIMENSION(:), INTENT(INOUT) :: VALUES
+      INTEGER :: I, J
+      REAL(KIND=8) :: TEMP
+      DO I = 2, SIZE(VALUES)
+         TEMP = VALUES(I)
+         J = I - 1
+         DO WHILE (J >= 1)
+            IF (VALUES(J) <= TEMP) EXIT
+            VALUES(J+1) = VALUES(J)
+            J = J - 1
+         END DO
+         VALUES(J+1) = TEMP
+      END DO
+   END SUBROUTINE SORT_REAL
+
+
+   INTEGER FUNCTION FIND_GRID_INDEX(GRID, VALUE)
+      REAL(KIND=8), DIMENSION(:), INTENT(IN) :: GRID
+      REAL(KIND=8), INTENT(IN) :: VALUE
+      INTEGER :: I
+      FIND_GRID_INDEX = -1
+      DO I = 1, SIZE(GRID)
+         IF (ABS(GRID(I)-VALUE) <= 1.d-12*MAX(1.d0,ABS(VALUE))) THEN
+            FIND_GRID_INDEX = I
+            RETURN
+         END IF
+      END DO
+   END FUNCTION FIND_GRID_INDEX
+
+
+   INTEGER FUNCTION LOWER_INTERVAL(GRID, VALUE)
+      REAL(KIND=8), DIMENSION(:), INTENT(IN) :: GRID
+      REAL(KIND=8), INTENT(IN) :: VALUE
+      INTEGER :: I
+      LOWER_INTERVAL = SIZE(GRID)-1
+      DO I = 1, SIZE(GRID)-1
+         IF (VALUE <= GRID(I+1)) THEN
+            LOWER_INTERVAL = I
+            RETURN
+         END IF
+      END DO
+   END FUNCTION LOWER_INTERVAL
+
+END MODULE external_field

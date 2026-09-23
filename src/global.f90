@@ -54,7 +54,7 @@ MODULE global
    CHARACTER*256 :: PARTDUMP_SAVE_PATH
    CHARACTER*256 :: PARTRESTART_LOAD_PATH = ''
    CHARACTER*256 :: CHECKS_SAVE_PATH
-   CHARACTER*256 :: RESIDUAL_SAVE_PATH
+   CHARACTER*256 :: RESIDUAL_SAVE_PATH = ''
    CHARACTER*256 :: INJECT_FILENAME
    REAL(KIND=8) :: INJECT_PROBABILITY = 1
    LOGICAL :: BOOL_INJECT_FROM_FILE = .FALSE.
@@ -89,6 +89,13 @@ MODULE global
    INTEGER, DIMENSION(:), ALLOCATABLE :: CELL_PROCS
    INTEGER :: NCELLS, NNODES, NBOUNDCELLS, NBOUNDNODES
    REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: CELL_VOLUMES
+
+   ! Reduced finite-element field space.  The geometry keeps its original
+   ! node numbering; these arrays map geometric nodes to periodic-equivalent
+   ! PETSc degrees of freedom and back to deterministic representative nodes.
+   INTEGER :: FIELD_DOF_COUNT = 0
+   INTEGER, DIMENSION(:), ALLOCATABLE :: NODE_TO_FIELD_DOF
+   INTEGER, DIMENSION(:), ALLOCATABLE :: FIELD_DOF_REPRESENTATIVE
 
 
    ENUM, BIND(C)
@@ -179,6 +186,12 @@ MODULE global
       INTEGER, DIMENSION(:), ALLOCATABLE        :: CELL_PG
       REAL(KIND=8), DIMENSION(:,:,:), ALLOCATABLE :: BASIS_COEFFS
       INTEGER, DIMENSION(:), ALLOCATABLE        :: PERIODIC_RELATED_NODE
+      INTEGER, DIMENSION(:,:), ALLOCATABLE      :: PERIODIC_PARTNER_CELL
+      INTEGER, DIMENSION(:,:), ALLOCATABLE      :: PERIODIC_PARTNER_FACE
+      INTEGER, DIMENSION(:,:), ALLOCATABLE      :: PERIODIC_PARTNER_GROUP
+      INTEGER, DIMENSION(:,:,:), ALLOCATABLE    :: PERIODIC_VERTEX_PERM
+      REAL(KIND=8), DIMENSION(:,:,:), ALLOCATABLE :: PERIODIC_TRANSLATION
+      INTEGER :: NUM_PERIODIC_FACE_PAIRS = 0
       REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: CELL_VOLUMES
    END TYPE UNSTRUCTURED_3D_GRID_DATA_STRUCTURE
 
@@ -227,7 +240,7 @@ MODULE global
       REAL(KIND=8) :: SPICE_NODE_POTENTIAL = 0.d0
       REAL(KIND=8) :: SPICE_NODE_CURRENT
 
-      REAL(KIND=8), DIMENSION(2) :: TRANSLATEVEC
+      REAL(KIND=8), DIMENSION(3) :: TRANSLATEVEC = 0.d0
 
       LOGICAL :: REACT = .FALSE.
       LOGICAL :: DUMP_FLUXES = .FALSE.
@@ -266,6 +279,7 @@ MODULE global
       INTEGER      :: IC
       INTEGER      :: IV1, IV2
       INTEGER      :: IFACE
+      INTEGER      :: PHYSICAL_GROUP = -1
       CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), POINTER :: VDF
 
       ! For thermionic emission and evaporation
@@ -280,6 +294,78 @@ MODULE global
 
    TYPE(EMIT_TASK_DATA_STRUCTURE), DIMENSION(:), ALLOCATABLE :: EMIT_TASKS
    INTEGER :: N_EMIT_TASKS
+
+   ! Optional, explicit mapping from an existing physical group to a
+   ! diagnostic source category.  It never changes the boundary condition.
+   TYPE PARTICLE_SOURCE_MAPPING
+      INTEGER :: PHYSICAL_GROUP = -1
+      INTEGER :: SOURCE_TAG = PARTICLE_SOURCE_UNKNOWN
+   END TYPE PARTICLE_SOURCE_MAPPING
+
+   TYPE(PARTICLE_SOURCE_MAPPING), DIMENSION(:), ALLOCATABLE :: PARTICLE_SOURCE_MAPPINGS
+   INTEGER :: N_PARTICLE_SOURCE_MAPPINGS = 0
+
+   ! Per-boundary-face fixed current-density emission; fractional count is
+   ! retained independently on each face to bound finite-window charge error.
+   TYPE SURFACE_CURRENT_EMIT_TASK
+      INTEGER :: PHYSICAL_GROUP = -1
+      INTEGER :: SPECIES_ID = -1
+      INTEGER :: IC = -1
+      INTEGER :: IFACE = -1
+      REAL(KIND=8) :: FACE_AREA = 0.d0
+      REAL(KIND=8) :: CURRENT_DENSITY = 0.d0
+      REAL(KIND=8) :: TEMPERATURE = 0.d0
+      REAL(KIND=8) :: FRACTIONAL_RESIDUAL = 0.d0
+      INTEGER(KIND=8) :: MACRO_COUNT_WINDOW = 0_8
+      REAL(KIND=8) :: CHARGE_WINDOW = 0.d0
+      CHARACTER(LEN=64) :: VDF_NAME = ''
+      CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), ALLOCATABLE :: VDF
+   END TYPE SURFACE_CURRENT_EMIT_TASK
+
+   TYPE(SURFACE_CURRENT_EMIT_TASK), DIMENSION(:), ALLOCATABLE :: SURFACE_CURRENT_EMIT_TASKS
+   INTEGER :: N_SURFACE_CURRENT_EMIT_TASKS = 0
+
+   TYPE SECONDARY_EMISSION_MODEL
+      INTEGER :: PHYSICAL_GROUP = -1
+      INTEGER :: INCIDENT_SPECIES_ID = -1
+      INTEGER :: ELECTRON_SPECIES_ID = -1
+      CHARACTER(LEN=512) :: TABLE_FILE = ''
+      REAL(KIND=8) :: SECONDARY_TEMPERATURE = 0.d0
+      REAL(KIND=8) :: SURFACE_AREA = 0.d0
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: INCIDENT_ENERGY_EV
+      REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: YIELD_TABLE
+      INTEGER(KIND=8) :: OUT_OF_RANGE_COUNT = 0_8
+      INTEGER(KIND=8) :: INCIDENT_EVENT_COUNT_WINDOW = 0_8
+      INTEGER(KIND=8) :: EMITTED_MACRO_COUNT_WINDOW = 0_8
+      REAL(KIND=8) :: INCIDENT_WEIGHT_WINDOW = 0.d0
+      REAL(KIND=8) :: INCIDENT_ENERGY_WEIGHTED_WINDOW = 0.d0
+      REAL(KIND=8) :: EMITTED_WEIGHT_WINDOW = 0.d0
+   END TYPE SECONDARY_EMISSION_MODEL
+
+   TYPE(SECONDARY_EMISSION_MODEL), DIMENSION(:), ALLOCATABLE :: SECONDARY_EMISSION_MODELS
+   INTEGER :: N_SECONDARY_EMISSION_MODELS = 0
+   INTEGER :: SURFACE_DIAGNOSTIC_WINDOW_STEPS = 0
+
+   TYPE SURFACE_EVENT_DATA
+      INTEGER :: PHYSICAL_GROUP = -1
+      INTEGER :: FACE_ID = -1
+      INTEGER :: IC = -1
+      INTEGER :: INCIDENT_SPECIES_ID = -1
+      REAL(KIND=8), DIMENSION(3) :: POSITION = 0.d0
+      REAL(KIND=8), DIMENSION(3) :: INWARD_NORMAL = 0.d0
+      REAL(KIND=8), DIMENSION(3) :: INCIDENT_VELOCITY = 0.d0
+      REAL(KIND=8) :: INCIDENT_ENERGY_EV = 0.d0
+      REAL(KIND=8) :: REMAINING_TIME = 0.d0
+      REAL(KIND=8) :: MACRO_WEIGHT = 0.d0
+   END TYPE SURFACE_EVENT_DATA
+
+   TYPE SURFACE_PRODUCT_DATA
+      INTEGER :: SPECIES_ID = -1
+      INTEGER :: IC = -1
+      REAL(KIND=8), DIMENSION(3) :: VELOCITY = 0.d0
+      REAL(KIND=8) :: EROT = 0.d0
+      REAL(KIND=8) :: EVIB = 0.d0
+   END TYPE SURFACE_PRODUCT_DATA
    
 
 
@@ -289,11 +375,12 @@ MODULE global
       REAL(KIND=8) :: UX, UY, UZ
       REAL(KIND=8) :: TTRAX, TTRAY, TTRAZ, TROT, TVIB
       INTEGER      :: MIX_ID
+      LOGICAL      :: SOURCE_ONLY = .FALSE.
       CLASS(VELOCITY_DISTRIBUTION_STRUCTURE), POINTER :: VDF
    END TYPE INITIAL_PARTICLES_DATA_STRUCTURE
 
    TYPE(INITIAL_PARTICLES_DATA_STRUCTURE), DIMENSION(:), ALLOCATABLE :: INITIAL_PARTICLES_TASKS
-   INTEGER :: N_INITIAL_PARTICLES_TASKS
+   INTEGER :: N_INITIAL_PARTICLES_TASKS = 0
    
 
    TYPE VOLUME_INJECT_DATA_STRUCTURE
@@ -342,6 +429,7 @@ MODULE global
 
 
    REAL(KIND=8), DIMENSION(3) :: EXTERNAL_B_FIELD = 0
+   CHARACTER(LEN=256) :: EXTERNAL_B_FIELD_FILE = ''
    REAL(KIND=8), DIMENSION(3) :: EXTERNAL_E_FIELD = 0
    ! This is used for defining static magnetic fields from solenoids.
    INTEGER         :: N_SOLENOIDS = 0
@@ -433,6 +521,36 @@ MODULE global
 
    LOGICAL           :: BOOL_THERMAL_BATH = .FALSE.
    REAL(KIND=8)      :: TBATH
+
+   ! Single 1D source-region model used by the sheath benchmark.  The source
+   ! interval is geometrical (x only); particle velocities remain 3D.
+   INTEGER, PARAMETER :: SOURCE_REINJECT_NONE = 0, SOURCE_REINJECT_PAIR = 1, SOURCE_REINJECT_SINGLE = 2
+   TYPE SOURCE_REINJECTION_RULE
+      INTEGER :: MODE = SOURCE_REINJECT_NONE
+      INTEGER :: TRIGGER_SPECIES = -1
+      INTEGER :: PRODUCT_SPECIES_1 = -1, PRODUCT_SPECIES_2 = -1
+      REAL(KIND=8) :: PRODUCT_TEMP_1 = 0.d0, PRODUCT_TEMP_2 = 0.d0
+      INTEGER :: LOSS_FACE = 0 ! 1 = x_min, 2 = x_max
+   END TYPE SOURCE_REINJECTION_RULE
+   TYPE(SOURCE_REINJECTION_RULE), DIMENSION(:), ALLOCATABLE :: SOURCE_REINJECTION_RULES
+   INTEGER :: N_SOURCE_REINJECTION_RULES = 0
+   LOGICAL :: BOOL_SOURCE_REGION = .FALSE.
+   REAL(KIND=8) :: SOURCE_REGION_XMIN = 0.d0, SOURCE_REGION_XMAX = 0.d0
+   LOGICAL :: BOOL_SOURCE_THERMALIZATION = .FALSE.
+   INTEGER :: SOURCE_THERMAL_SPECIES = -1
+   REAL(KIND=8) :: SOURCE_THERMAL_NU = 0.d0, SOURCE_THERMAL_TEMP = 0.d0
+   REAL(KIND=8) :: SOURCE_THERMAL_UX = 0.d0, SOURCE_THERMAL_UY = 0.d0, SOURCE_THERMAL_UZ = 0.d0
+   INTEGER :: SOURCE_REINJECTION_MODE = SOURCE_REINJECT_NONE
+   INTEGER :: SOURCE_TRIGGER_SPECIES = -1, SOURCE_PRODUCT_SPECIES_1 = -1, SOURCE_PRODUCT_SPECIES_2 = -1
+   REAL(KIND=8) :: SOURCE_PRODUCT_TEMP_1 = 0.d0, SOURCE_PRODUCT_TEMP_2 = 0.d0
+   INTEGER :: SOURCE_LOSS_FACE = 0 ! 1 = x_min, 2 = x_max
+   LOGICAL :: BOOL_SOURCE_CONSTANT_FLUX = .FALSE.
+   INTEGER :: SOURCE_FLUX_SPECIES = -1
+   REAL(KIND=8) :: SOURCE_FLUX_RATE = 0.d0, SOURCE_FLUX_TEMP = 0.d0
+   REAL(KIND=8) :: SOURCE_FLUX_UX = 0.d0, SOURCE_FLUX_UY = 0.d0, SOURCE_FLUX_UZ = 0.d0
+   REAL(KIND=8) :: SOURCE_FLUX_FRACTION = 0.d0
+   INTEGER :: SOURCE_THERMALIZED_COUNT = 0, SOURCE_LOSS_COUNT = 0
+   INTEGER :: SOURCE_REINJECTED_COUNT = 0, SOURCE_FLUX_INJECTED_COUNT = 0
 
    INTEGER           :: BGK_MODEL_TYPE_INT = 0
    REAL(KIND=8)      :: BGK_BG_DENS, BGK_SIGMA, BGK_BG_MASS
@@ -714,6 +832,12 @@ MODULE global
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
    CHARACTER*256                           :: BOUNDARY_SAVE_PATH
+   INTEGER                                  :: EXTRACTION_GROUP = -1
+   REAL(KIND=8)                             :: EXTRACTION_AREA = 0.d0
+   INTEGER                                  :: EXTRACTION_RESET_TIMESTEP = 0
+   INTEGER(KIND=8), DIMENSION(:,:,:), ALLOCATABLE :: EXTRACTION_COUNT
+   REAL(KIND=8), DIMENSION(:,:,:), ALLOCATABLE :: EXTRACTION_WEIGHT
+   REAL(KIND=8), DIMENSION(:,:,:), ALLOCATABLE :: EXTRACTION_CHARGE
 
    REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: TIMESTEP_NIN
    REAL(KIND=8), DIMENSION(:), ALLOCATABLE :: TIMESTEP_NOUT
@@ -788,35 +912,74 @@ CONTAINS  ! @@@@@@@@@@@@@@@@@@@@@ SUBROUTINES @@@@@@@@@@@@@@@@@@@@@@@@
    
    SUBROUTINE NEWTYPE
    
-      INTEGER :: ii
-      INTEGER(KIND=MPI_ADDRESS_KIND) :: extent_dpr, extent_int, extent_int8, extent_logical
-      INTEGER, DIMENSION(13) :: blocklengths, oldtypes
-      INTEGER(KIND=MPI_ADDRESS_KIND), DIMENSION(13) :: offsets
+      INTEGER :: ii, raw_particle_type
+      INTEGER, DIMENSION(14) :: blocklengths, oldtypes
+      INTEGER(KIND=MPI_ADDRESS_KIND), DIMENSION(14) :: offsets
+      INTEGER(KIND=MPI_ADDRESS_KIND) :: base_address, particle_extent
+      TYPE(PARTICLE_DATA_STRUCTURE) :: particle_layout_probe
      
-      CALL MPI_TYPE_EXTENT(MPI_DOUBLE_PRECISION, extent_dpr,  ierr)  
-      CALL MPI_TYPE_EXTENT(MPI_INTEGER,          extent_int,  ierr)
-      CALL MPI_TYPE_EXTENT(MPI_INTEGER8,         extent_int8, ierr)
-      CALL MPI_TYPE_EXTENT(MPI_LOGICAL,         extent_logical, ierr)
+      ! Use the compiler's actual component addresses.  The previous
+      ! implementation assumed that all components were packed consecutively
+      ! and obtained the primitive extents through the legacy MPI_TYPE_EXTENT
+      ! interface.  That is not safe for a Fortran derived type: padding (in
+      ! particular before the LOGICAL component) is implementation-defined,
+      ! and an ABI mismatch can corrupt the MPI_ADDRESS_KIND result.
+      CALL MPI_GET_ADDRESS(particle_layout_probe%X, base_address, ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%X, offsets(1), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%Y, offsets(2), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%Z, offsets(3), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%VX, offsets(4), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%VY, offsets(5), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%VZ, offsets(6), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%EROT, offsets(7), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%EVIB, offsets(8), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%DTRIM, offsets(9), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%IC, offsets(10), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%S_ID, offsets(11), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%SOURCE_TAG, offsets(12), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%ID, offsets(13), ierr)
+      CALL MPI_GET_ADDRESS(particle_layout_probe%DUMP_TRAJ, offsets(14), ierr)
+      offsets = offsets - base_address
            
       blocklengths = 1
      
       oldtypes(1:9) = MPI_DOUBLE_PRECISION  
-      oldtypes(10:11) = MPI_INTEGER
-      oldtypes(12) = MPI_INTEGER8
-      oldtypes(13) = MPI_LOGICAL
-          
-      offsets(1) = 0  
-      DO ii = 2, 10
-         offsets(ii) = offsets(ii - 1) + extent_dpr * blocklengths(ii - 1)
-      END DO
-      offsets(11) = offsets(10) + extent_int * blocklengths(10)
-      offsets(12) = offsets(11) + extent_int * blocklengths(11)
-      offsets(13) = offsets(12) + extent_int8 * blocklengths(12)
-      
-      CALL MPI_TYPE_CREATE_STRUCT(13, blocklengths, offsets, oldtypes, MPI_PARTICLE_DATA_STRUCTURE, ierr)
+      oldtypes(10:12) = MPI_INTEGER
+      oldtypes(13) = MPI_INTEGER8
+      oldtypes(14) = MPI_LOGICAL
+
+      CALL MPI_TYPE_CREATE_STRUCT(14, blocklengths, offsets, oldtypes, raw_particle_type, ierr)
+      CALL MPI_TYPE_COMMIT(raw_particle_type, ierr)
+
+      ! MPI count>1 must advance by the actual Fortran array element stride,
+      ! which can be larger than the occupied bytes represented by the struct.
+      particle_extent = INT(STORAGE_SIZE(particle_layout_probe)/8, KIND=MPI_ADDRESS_KIND)
+      CALL MPI_TYPE_CREATE_RESIZED(raw_particle_type, 0_MPI_ADDRESS_KIND, particle_extent, &
+                                   MPI_PARTICLE_DATA_STRUCTURE, ierr)
       CALL MPI_TYPE_COMMIT(MPI_PARTICLE_DATA_STRUCTURE, ierr)   
+      CALL MPI_TYPE_FREE(raw_particle_type, ierr)
    
    END SUBROUTINE NEWTYPE
+
+
+   INTEGER FUNCTION PARTICLE_SOURCE_TAG_FOR_GROUP(PHYSICAL_GROUP)
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN) :: PHYSICAL_GROUP
+      INTEGER :: I
+
+      PARTICLE_SOURCE_TAG_FOR_GROUP = PARTICLE_SOURCE_UNKNOWN
+      IF (.NOT. ALLOCATED(PARTICLE_SOURCE_MAPPINGS)) RETURN
+
+      DO I = 1, N_PARTICLE_SOURCE_MAPPINGS
+         IF (PARTICLE_SOURCE_MAPPINGS(I)%PHYSICAL_GROUP == PHYSICAL_GROUP) THEN
+            PARTICLE_SOURCE_TAG_FOR_GROUP = PARTICLE_SOURCE_MAPPINGS(I)%SOURCE_TAG
+            RETURN
+         END IF
+      END DO
+
+   END FUNCTION PARTICLE_SOURCE_TAG_FOR_GROUP
 
 
 END MODULE global

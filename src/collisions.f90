@@ -391,6 +391,8 @@ MODULE collisions
 
                   particles(JP1)%S_ID = REACTIONS(JR)%P1_SP_ID
                   particles(JP2)%S_ID = REACTIONS(JR)%P2_SP_ID
+                  CALL SET_PARTICLE_SOURCE_TAG(particles(JP1), PARTICLE_SOURCE_OTHER)
+                  CALL SET_PARTICLE_SOURCE_TAG(particles(JP2), PARTICLE_SOURCE_OTHER)
 
                   TOTDOF = 3. + SPECIES(P2_SP_ID)%ROTDOF + SPECIES(P2_SP_ID)%VIBDOF + &
                         SPECIES(P1_SP_ID)%ROTDOF
@@ -460,6 +462,7 @@ MODULE collisions
 
                      CALL INIT_PARTICLE(particles(JP2)%X,particles(JP2)%Y,particles(JP2)%Z, &
                      C2(1),C2(2),C2(3),EROT,EVIB,P3_SP_ID,JC,DT, NEWparticle)
+                     CALL SET_PARTICLE_SOURCE_TAG(NEWparticle, PARTICLE_SOURCE_OTHER)
                      !WRITE(*,*) 'Should be adding particle!'
                      CALL ADD_PARTICLE_ARRAY(NEWparticle, NP_PROC, particles)
                      
@@ -924,6 +927,7 @@ MODULE collisions
 
                      CALL INIT_PARTICLE(particles(IP2)%X,particles(IP2)%Y,particles(IP2)%Z, &
                      C2(1),C2(2),C2(3),EROT,EVIB,P3_SP_ID,particles(IP2)%IC,DT, NEWparticle)
+                     CALL SET_PARTICLE_SOURCE_TAG(NEWparticle, PARTICLE_SOURCE_OTHER)
                      !WRITE(*,*) 'Should be adding particle!'
                      CALL ADD_PARTICLE_ARRAY(NEWparticle, NP_PROC, particles)
 
@@ -1469,6 +1473,8 @@ MODULE collisions
 
                      particles(JP1)%S_ID = REACTIONS(JR)%P1_SP_ID
                      particles(JP2)%S_ID = REACTIONS(JR)%P2_SP_ID
+                     CALL SET_PARTICLE_SOURCE_TAG(particles(JP1), PARTICLE_SOURCE_OTHER)
+                     CALL SET_PARTICLE_SOURCE_TAG(particles(JP2), PARTICLE_SOURCE_OTHER)
 
                      IF (.NOT. REACTIONS(JR)%IS_CEX) THEN
          
@@ -1540,6 +1546,7 @@ MODULE collisions
                            
                            CALL INIT_PARTICLE(particles(JP2)%X,particles(JP2)%Y,particles(JP2)%Z, &
                            C2(1),C2(2),C2(3),EROT,EVIB,P3_SP_ID,particles(JP2)%IC,DT, NEWparticle)
+                           CALL SET_PARTICLE_SOURCE_TAG(NEWparticle, PARTICLE_SOURCE_OTHER)
                            !WRITE(*,*) 'Should be adding particle!'
                            CALL ADD_PARTICLE_ARRAY(NEWparticle, NP_PROC, particles)
                            
@@ -1816,6 +1823,8 @@ MODULE collisions
 
                   particles(JP1)%S_ID = REACTIONS(JR)%P1_SP_ID
                   particles(JP2)%S_ID = REACTIONS(JR)%P2_SP_ID
+                  CALL SET_PARTICLE_SOURCE_TAG(particles(JP1), PARTICLE_SOURCE_OTHER)
+                  CALL SET_PARTICLE_SOURCE_TAG(particles(JP2), PARTICLE_SOURCE_OTHER)
 
 
                   IF (.NOT. REACTIONS(JR)%IS_CEX) THEN
@@ -1899,6 +1908,7 @@ MODULE collisions
                         
                         CALL INIT_PARTICLE(particles(JP2)%X,particles(JP2)%Y,particles(JP2)%Z, &
                         C2(1),C2(2),C2(3),EROT,EVIB,P3_SP_ID,particles(JP2)%IC,DT, NEWparticle)
+                        CALL SET_PARTICLE_SOURCE_TAG(NEWparticle, PARTICLE_SOURCE_OTHER)
                         !WRITE(*,*) 'Should be adding particle!'
                         CALL ADD_PARTICLE_ARRAY(NEWparticle, NP_PROC, particles)
 
@@ -1937,6 +1947,7 @@ MODULE collisions
                         
                         CALL INIT_PARTICLE(particles(JP2)%X,particles(JP2)%Y,particles(JP2)%Z, &
                         C2(1),C2(2),C2(3),EROT,EVIB,P3_SP_ID,particles(JP2)%IC,DT, NEWparticle)
+                        CALL SET_PARTICLE_SOURCE_TAG(NEWparticle, PARTICLE_SOURCE_OTHER)
                         !WRITE(*,*) 'Should be adding particle!'
                         CALL ADD_PARTICLE_ARRAY(NEWparticle, NP_PROC, particles)
                         JP3 = NP_PROC
@@ -1962,6 +1973,7 @@ MODULE collisions
                         
                         CALL INIT_PARTICLE(particles(JP3)%X,particles(JP3)%Y,particles(JP3)%Z, &
                         C2(1),C2(2),C2(3),EROT,EVIB,P3_SP_ID,particles(JP3)%IC,DT, NEWparticle)
+                        CALL SET_PARTICLE_SOURCE_TAG(NEWparticle, PARTICLE_SOURCE_OTHER)
                         !WRITE(*,*) 'Should be adding particle!'
                         CALL ADD_PARTICLE_ARRAY(NEWparticle, NP_PROC, particles)
                         
