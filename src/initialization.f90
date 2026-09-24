@@ -2858,7 +2858,9 @@ MODULE initialization
       INTEGER :: N_STR, I
 
       CALL SPLIT_STR(DEFINITION, ' ', STRARRAY, N_STR)
-      IF (N_STR /= 7) CALL ERROR_ABORT('Source_reinjection expects: pair|single trigger product1 T1[K] product2|none T2[K] x_min|x_max.')
+      IF (N_STR /= 7) CALL ERROR_ABORT( &
+         'Source_reinjection expects: pair|single trigger product1 T1[K] ' // &
+         'product2|none T2[K] x_min|x_max.')
 
       READ(STRARRAY(1),'(A)') MODE
       IF (TRIM(MODE) == 'pair') THEN
@@ -3416,6 +3418,7 @@ MODULE initialization
 
       INTEGER            :: IP, NP_INIT, IC
       REAL(KIND=8)       :: Xp, Yp, Zp, VXp, VYp, VZp, EROT, EVIB, DOMAIN_VOLUME, VOL
+      REAL(KIND=8)       :: SOURCE_CELL_XMIN, SOURCE_CELL_XMAX, CELL_XMIN, CELL_XMAX
       INTEGER            :: CID
 
       REAL(KIND=8), DIMENSION(3) :: V1, V2, V3, V4
@@ -3471,6 +3474,14 @@ MODULE initialization
                   ELSE IF (DIMS == 3) THEN
                      VOL = U3D_GRID%CELL_VOLUMES(IC)
                   END IF
+                  IF (INITIAL_PARTICLES_TASKS(ITASK)%SOURCE_ONLY .AND. DIMS == 1) THEN
+                     CELL_XMIN = U1D_GRID%NODE_COORDS(1,U1D_GRID%CELL_NODES(1,IC))
+                     CELL_XMAX = U1D_GRID%NODE_COORDS(1,U1D_GRID%CELL_NODES(2,IC))
+                     SOURCE_CELL_XMIN = MAX(CELL_XMIN, SOURCE_REGION_XMIN)
+                     SOURCE_CELL_XMAX = MIN(CELL_XMAX, SOURCE_REGION_XMAX)
+                     IF (SOURCE_CELL_XMAX <= SOURCE_CELL_XMIN) CYCLE
+                     VOL = (SOURCE_CELL_XMAX-SOURCE_CELL_XMIN)*(YMAX-YMIN)*(ZMAX-ZMIN)
+                  END IF
                   NP_INIT = RANDINT(INITIAL_PARTICLES_TASKS(ITASK)%NRHO/(FNUM*SPECIES(S_ID)%SPWT)*VOL* &
                               MIXTURES(INITIAL_PARTICLES_TASKS(ITASK)%MIX_ID)%COMPONENTS(i)%MOLFRAC)
                   IF (NP_INIT == 0) CYCLE
@@ -3505,7 +3516,11 @@ MODULE initialization
                      END IF
 
                      IF (DIMS == 1) THEN
-                        XP = V1(1) + (V2(1)-V1(1))*S
+                        IF (INITIAL_PARTICLES_TASKS(ITASK)%SOURCE_ONLY) THEN
+                           XP = SOURCE_CELL_XMIN + (SOURCE_CELL_XMAX-SOURCE_CELL_XMIN)*rf()
+                        ELSE
+                           XP = V1(1) + (V2(1)-V1(1))*S
+                        END IF
                         YP = YMIN + (YMAX-YMIN)*T
                         ZP = ZMIN + (ZMAX-ZMIN)*U
                      ELSE IF (DIMS == 2) THEN
@@ -3548,6 +3563,8 @@ MODULE initialization
                      CALL INTERNAL_ENERGY(SPECIES(S_ID)%VIBDOF, INITIAL_PARTICLES_TASKS(ITASK)%TVIB, EVIB)
 
                      CALL INIT_PARTICLE(XP,YP,ZP,VXP,VYP,VZP,EROT,EVIB,S_ID,IC,DT, particleNOW) ! Save in particle
+                     IF (INITIAL_PARTICLES_TASKS(ITASK)%SOURCE_ONLY) &
+                        CALL SET_PARTICLE_SOURCE_TAG(particleNOW, PARTICLE_SOURCE_REGION)
                      CALL ADD_PARTICLE_ARRAY(particleNOW, NP_PROC, particles) ! Add particle to local array
 
 
@@ -3635,15 +3652,17 @@ MODULE initialization
 
       IMPLICIT NONE
       INTEGER :: I, J, EXTERNAL_FIELD_ERROR
+      INTEGER :: SOURCE_LOSS_GROUP, SOURCE_LOSS_CELL, SOURCE_LOSS_NODE
       TYPE(SOURCE_REINJECTION_RULE) :: SOURCE_RULE
       CHARACTER(LEN=512) :: EXTERNAL_FIELD_MESSAGE
       LOGICAL :: SOURCE_MAPPING_USED
+      REAL(KIND=8) :: SOURCE_MESH_XMIN, SOURCE_MESH_XMAX
 
       IF (ALLOCATED(INITIAL_PARTICLES_TASKS)) THEN
          DO I = 1, N_INITIAL_PARTICLES_TASKS
             IF (.NOT. INITIAL_PARTICLES_TASKS(I)%SOURCE_ONLY) CYCLE
-            IF (.NOT. BOOL_SOURCE_REGION .OR. DIMS /= 1 .OR. AXI .OR. GRID_TYPE == UNSTRUCTURED) &
-               CALL ERROR_ABORT('Source_initial_particles requires a 1D structured source region.')
+            IF (.NOT. BOOL_SOURCE_REGION .OR. DIMS /= 1 .OR. AXI) &
+               CALL ERROR_ABORT('Source_initial_particles requires a non-axisymmetric 1D source region.')
             IF (SOURCE_REGION_XMIN <= XMIN .OR. SOURCE_REGION_XMAX >= XMAX .OR. &
                 SOURCE_REGION_XMIN >= SOURCE_REGION_XMAX) &
                CALL ERROR_ABORT('Source_initial_particles requires an ordered source interval inside the domain.')
@@ -3751,10 +3770,19 @@ MODULE initialization
       END IF
 
       IF (BOOL_SOURCE_THERMALIZATION .OR. SOURCE_REINJECTION_MODE /= SOURCE_REINJECT_NONE .OR. &
-          BOOL_SOURCE_CONSTANT_FLUX) THEN
+          N_SOURCE_REINJECTION_RULES > 0) THEN
+         IF (.NOT. BOOL_SOURCE_REGION) CALL ERROR_ABORT('Source physics requires Source_region to be defined.')
+         IF (DIMS /= 1 .OR. AXI) &
+            CALL ERROR_ABORT('Source-region physics currently supports only non-axisymmetric 1D grids.')
+         IF (SOURCE_REGION_XMIN <= XMIN .OR. SOURCE_REGION_XMAX >= XMAX .OR. &
+             SOURCE_REGION_XMIN >= SOURCE_REGION_XMAX) &
+            CALL ERROR_ABORT('Source_region must be an ordered interval strictly inside the x domain.')
+      END IF
+
+      IF (BOOL_SOURCE_CONSTANT_FLUX) THEN
          IF (.NOT. BOOL_SOURCE_REGION) CALL ERROR_ABORT('Source physics requires Source_region to be defined.')
          IF (DIMS /= 1 .OR. AXI .OR. GRID_TYPE == UNSTRUCTURED) &
-            CALL ERROR_ABORT('Source-region physics currently supports only non-axisymmetric 1D structured grids.')
+            CALL ERROR_ABORT('Source_constant_flux currently supports only non-axisymmetric 1D structured grids.')
          IF (SOURCE_REGION_XMIN <= XMIN .OR. SOURCE_REGION_XMAX >= XMAX .OR. &
              SOURCE_REGION_XMIN >= SOURCE_REGION_XMAX) &
             CALL ERROR_ABORT('Source_region must be an ordered interval strictly inside the x domain.')
@@ -3807,6 +3835,29 @@ MODULE initialization
             IF (BOOL_PERIODIC(SOURCE_RULE%LOSS_FACE) .OR. BOOL_SPECULAR(SOURCE_RULE%LOSS_FACE) .OR. &
                 BOOL_DIFFUSE(SOURCE_RULE%LOSS_FACE) .OR. BOOL_REACT(SOURCE_RULE%LOSS_FACE)) &
                CALL ERROR_ABORT('Source_reinjection sink must be an absorbing, non-reactive x boundary.')
+            IF (GRID_TYPE == UNSTRUCTURED .AND. DIMS == 1) THEN
+               SOURCE_LOSS_GROUP = -1
+               SOURCE_MESH_XMIN = MINVAL(U1D_GRID%NODE_COORDS(1,:))
+               SOURCE_MESH_XMAX = MAXVAL(U1D_GRID%NODE_COORDS(1,:))
+               DO SOURCE_LOSS_CELL = 1, U1D_GRID%NUM_CELLS
+                  IF (U1D_GRID%CELL_NEIGHBORS(SOURCE_RULE%LOSS_FACE,SOURCE_LOSS_CELL) /= -1) CYCLE
+                  SOURCE_LOSS_NODE = U1D_GRID%CELL_NODES(SOURCE_RULE%LOSS_FACE,SOURCE_LOSS_CELL)
+                  IF (SOURCE_RULE%LOSS_FACE == 1 .AND. &
+                      U1D_GRID%NODE_COORDS(1,SOURCE_LOSS_NODE) == SOURCE_MESH_XMIN) THEN
+                     SOURCE_LOSS_GROUP = U1D_GRID%CELL_EDGES_PG(SOURCE_RULE%LOSS_FACE,SOURCE_LOSS_CELL)
+                     EXIT
+                  ELSE IF (SOURCE_RULE%LOSS_FACE == 2 .AND. &
+                           U1D_GRID%NODE_COORDS(1,SOURCE_LOSS_NODE) == SOURCE_MESH_XMAX) THEN
+                     SOURCE_LOSS_GROUP = U1D_GRID%CELL_EDGES_PG(SOURCE_RULE%LOSS_FACE,SOURCE_LOSS_CELL)
+                     EXIT
+                  END IF
+               END DO
+               IF (SOURCE_LOSS_GROUP < 1 .OR. SOURCE_LOSS_GROUP > N_GRID_BC) &
+                  CALL ERROR_ABORT('Source_reinjection x sink has no physical boundary group on the mesh endpoint.')
+               IF (GRID_BC(SOURCE_LOSS_GROUP)%PARTICLE_BC(SOURCE_RULE%TRIGGER_SPECIES) /= VACUUM .OR. &
+                   GRID_BC(SOURCE_LOSS_GROUP)%REACT) &
+                  CALL ERROR_ABORT('Source_reinjection sink physical group must be vacuum and non-reactive.')
+            END IF
          END DO
       END IF
 

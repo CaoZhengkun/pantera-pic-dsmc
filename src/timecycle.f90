@@ -1407,6 +1407,7 @@ MODULE timecycle
       TYPE(SOURCE_REINJECTION_RULE) :: RULE
       INTEGER :: PRODUCT_INDEX, S_ID, IC, SELECTED_RULE
       REAL(KIND=8) :: PRODUCT_TEMP, X, Y, Z, VX, VY, VZ, EROT, EVIB, MASS
+      CHARACTER(LEN=256) :: ERROR_MESSAGE
 
       SELECTED_RULE = 1
       IF (PRESENT(RULE_INDEX)) SELECTED_RULE = RULE_INDEX
@@ -1426,6 +1427,12 @@ MODULE timecycle
       Z = 0.5d0*(ZMIN+ZMAX)
       X = SOURCE_REGION_XMIN + (SOURCE_REGION_XMAX-SOURCE_REGION_XMIN)*rf()
       CALL CELL_FROM_POSITION(X, Y, IC)
+      IF (GRID_TYPE == UNSTRUCTURED .AND. (IC < 1 .OR. IC > NCELLS)) THEN
+         WRITE(ERROR_MESSAGE,'(A,ES14.6,A,ES14.6,A,ES14.6,A,I0)') &
+              'Source reinjection x=', X, ' in interval [', SOURCE_REGION_XMIN, ',', SOURCE_REGION_XMAX, &
+              '] was not located; cell=', IC
+         CALL ERROR_ABORT(TRIM(ERROR_MESSAGE))
+      END IF
 
       DO PRODUCT_INDEX = 1, 1 + MERGE(1,0,RULE%MODE == SOURCE_REINJECT_PAIR)
          IF (PRODUCT_INDEX == 1) THEN
@@ -2436,8 +2443,25 @@ MODULE timecycle
                            ! END IF
                            
                         ELSE
-                           REMOVE_PART(IP) = .TRUE.
-                           particles(IP)%DTRIM = 0.d0
+                           SOURCE_RULE_INDEX = 0
+                           IF (DIMS == 1 .AND. GRID_TYPE == UNSTRUCTURED .AND. NEIGHBOR == -1 .AND. &
+                               GRID_BC(FACE_PG)%PARTICLE_BC(particles(IP)%S_ID) == VACUUM .AND. &
+                               .NOT. GRID_BC(FACE_PG)%REACT) THEN
+                              SOURCE_RULE_INDEX = FIND_SOURCE_REINJECTION_RULE(particles(IP)%S_ID, BOUNDCOLL)
+                           END IF
+                           IF (SOURCE_RULE_INDEX > 0) THEN
+                              SOURCE_REMAINING_TIME = MAX(0.d0, particles(IP)%DTRIM)
+                              particles(IP)%DTRIM = 0.d0
+                              REMOVE_PART(IP) = .TRUE.
+                              SOURCE_LOSS_COUNT = SOURCE_LOSS_COUNT + 1
+                              SOURCE_EVENTS_THIS_STEP = SOURCE_EVENTS_THIS_STEP + 1
+                              IF (SOURCE_EVENTS_THIS_STEP > 100000) &
+                                 CALL ERROR_ABORT('Source reinjection exceeded 100000 loss events in one timestep.')
+                              CALL SOURCE_REINJECT_PARTICLES(SOURCE_REMAINING_TIME, REMOVE_PART, SOURCE_RULE_INDEX)
+                           ELSE
+                              REMOVE_PART(IP) = .TRUE.
+                              particles(IP)%DTRIM = 0.d0
+                           END IF
                         END IF
 
 

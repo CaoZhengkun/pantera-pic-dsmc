@@ -53,7 +53,7 @@ MODULE grid_and_partition
       REAL(KIND=8), INTENT(IN) :: XP, YP ! Location of particle
       INTEGER, INTENT(OUT)     :: IDCELL ! ID of cell to which the particle belongs
 
-      INTEGER      :: XCELL, YCELL
+      INTEGER      :: XCELL, YCELL, IC, NODE1, NODE2
       REAL(KIND=8) :: DX, DY
 
       IF (GRID_TYPE == RECTILINEAR_UNIFORM) THEN
@@ -96,6 +96,21 @@ MODULE grid_and_partition
          END IF
 
          IDCELL = XCELL + NX*(YCELL-1)
+      ELSE IF (GRID_TYPE == UNSTRUCTURED .AND. DIMS == 1) THEN
+         IDCELL = -1
+         DO IC = 1, U1D_GRID%NUM_CELLS
+            NODE1 = U1D_GRID%CELL_NODES(1,IC)
+            NODE2 = U1D_GRID%CELL_NODES(2,IC)
+            IF (XP < U1D_GRID%NODE_COORDS(1,NODE1)) CYCLE
+            IF (XP < U1D_GRID%NODE_COORDS(1,NODE2)) THEN
+               IDCELL = IC
+               RETURN
+            END IF
+            IF (XP == XMAX .AND. U1D_GRID%NODE_COORDS(1,NODE2) == XMAX) THEN
+               IDCELL = IC
+               RETURN
+            END IF
+         END DO
       END IF
 
    END SUBROUTINE CELL_FROM_POSITION
